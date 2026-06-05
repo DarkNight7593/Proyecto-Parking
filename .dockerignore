@@ -1,0 +1,37 @@
+# ========================
+# Archivos de Caché de Python
+# ========================
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# ========================
+# Base de datos local
+# ========================
+# Es importante excluir la base de datos local para no copiar datos de prueba al contenedor.
+parkingpro.db
+*.db
+*.sqlite3
+
+# ========================
+# Entornos Virtuales (por si acaso los creas después)
+# ========================
+venv/
+env/
+.venv/
+.env
+
+# ========================
+# Archivos de Git e IDEs
+# ========================
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# ========================
+# Archivos del Sistema Operativo
+# ========================
+.DS_Store
+Thumbs.db

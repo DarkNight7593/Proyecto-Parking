@@ -1,0 +1,263 @@
+"""
+ParkingPro - Capa de acceso a datos SQLite
+Thread-safe mediante conexiones locales por hilo.
+"""
+import sqlite3
+import threading
+from datetime import datetime
+from typing import List, Dict, Optional
+
+
+class Database:
+    """Capa de datos para ParkingPro usando SQLite."""
+
+    def __init__(self, db_path: str = "parkingpro.db"):
+        self.db_path = db_path
+        self._local  = threading.local()
+
+    def _conn(self) -> sqlite3.Connection:
+        """Conexión SQLite thread-local."""
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            self._local.conn = sqlite3.connect(self.db_path)
+            self._local.conn.row_factory = sqlite3.Row
+            self._local.conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn.execute("PRAGMA foreign_keys=ON")
+        return self._local.conn
+
+    # ─── Inicialización ───────────────────────────────────────────────────────
+
+    def inicializar(self):
+        """Crea las tablas si no existen. Seguro de llamar múltiples veces."""
+        conn = self._conn()
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS sesiones (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_numero TEXT    UNIQUE NOT NULL,
+                placa         TEXT    NOT NULL,
+                tipo_vehiculo TEXT    NOT NULL,
+                hora_entrada  TEXT    NOT NULL,
+                hora_salida   TEXT,
+                minutos_total INTEGER,
+                monto         REAL,
+                estado        TEXT    NOT NULL DEFAULT 'activo',
+                observaciones TEXT,
+                created_at    TEXT    DEFAULT (datetime('now','localtime'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_sesiones_estado  ON sesiones(estado);
+            CREATE INDEX IF NOT EXISTS idx_sesiones_placa   ON sesiones(placa);
+            CREATE INDEX IF NOT EXISTS idx_sesiones_entrada ON sesiones(hora_entrada);
+            CREATE INDEX IF NOT EXISTS idx_sesiones_ticket  ON sesiones(ticket_numero);
+        """)
+        conn.commit()
+
+    # ─── Ticket ───────────────────────────────────────────────────────────────
+
+    def _nuevo_ticket(self) -> str:
+        conn = self._conn()
+        hoy  = datetime.now().strftime("%Y%m%d")
+        row  = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM sesiones WHERE ticket_numero LIKE ?",
+            (f"TK{hoy}%",),
+        ).fetchone()
+        seq = (row["cnt"] if row else 0) + 1
+        return f"TK{hoy}{seq:04d}"
+
+    # ─── CRUD de sesiones ─────────────────────────────────────────────────────
+
+    def registrar_entrada(self, placa: str, tipo_vehiculo: str,
+                          observaciones: str = "") -> Dict:
+        """
+        Registra la entrada. Lanza ValueError si la placa ya está activa.
+        Retorna el dict de la sesión creada.
+        """
+        conn  = self._conn()
+        placa = placa.upper().strip()
+
+        dup = conn.execute(
+            "SELECT ticket_numero FROM sesiones WHERE placa=? AND estado='activo'",
+            (placa,),
+        ).fetchone()
+        if dup:
+            raise ValueError(
+                f"La placa {placa} ya tiene sesión activa (Ticket: {dup['ticket_numero']})"
+            )
+
+        ticket = self._nuevo_ticket()
+        ahora  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        conn.execute(
+            """INSERT INTO sesiones
+               (ticket_numero, placa, tipo_vehiculo, hora_entrada, estado, observaciones)
+               VALUES (?, ?, ?, ?, 'activo', ?)""",
+            (ticket, placa, tipo_vehiculo, ahora, observaciones),
+        )
+        conn.commit()
+        return dict(conn.execute(
+            "SELECT * FROM sesiones WHERE ticket_numero=?", (ticket,)
+        ).fetchone())
+
+    def get_sesiones_activas(self) -> List[Dict]:
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM sesiones WHERE estado='activo' ORDER BY hora_entrada DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_sesion_por_id(self, sesion_id: int) -> Optional[Dict]:
+        conn = self._conn()
+        row  = conn.execute("SELECT * FROM sesiones WHERE id=?", (sesion_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_sesion_activa_por_placa(self, placa: str) -> Optional[Dict]:
+        conn = self._conn()
+        row  = conn.execute(
+            "SELECT * FROM sesiones WHERE placa=? AND estado='activo'",
+            (placa.upper().strip(),),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def cobrar_sesion(self, sesion_id: int, monto: float) -> Dict:
+        """Cierra la sesión registrando pago y hora de salida. Retorna sesión actualizada."""
+        conn   = self._conn()
+        sesion = self.get_sesion_por_id(sesion_id)
+        if not sesion:
+            raise ValueError(f"Sesión {sesion_id} no encontrada")
+        if sesion["estado"] != "activo":
+            raise ValueError(f"La sesión {sesion_id} no está activa")
+
+        ahora   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entrada = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
+        salida  = datetime.strptime(ahora,                  "%Y-%m-%d %H:%M:%S")
+        minutos = max(1, int((salida - entrada).total_seconds() / 60))
+
+        conn.execute(
+            """UPDATE sesiones
+               SET hora_salida=?, minutos_total=?, monto=?, estado='cobrado'
+               WHERE id=?""",
+            (ahora, minutos, round(monto, 2), sesion_id),
+        )
+        conn.commit()
+        return self.get_sesion_por_id(sesion_id)
+
+    def cancelar_sesion(self, sesion_id: int):
+        conn = self._conn()
+        conn.execute(
+            "UPDATE sesiones SET estado='cancelado' WHERE id=? AND estado='activo'",
+            (sesion_id,),
+        )
+        conn.commit()
+
+    def contar_activos(self) -> int:
+        conn = self._conn()
+        row  = conn.execute(
+            "SELECT COUNT(*) AS n FROM sesiones WHERE estado='activo'"
+        ).fetchone()
+        return row["n"] if row else 0
+
+    # ─── KPIs y Reportes ──────────────────────────────────────────────────────
+
+    def get_resumen_hoy(self) -> Dict:
+        conn = self._conn()
+        hoy  = datetime.now().strftime("%Y-%m-%d")
+        row  = conn.execute("""
+            SELECT
+                COUNT(*)                                                    AS total_vehiculos,
+                COALESCE(SUM(CASE WHEN estado='cobrado' THEN monto END), 0) AS ingresos,
+                COALESCE(AVG(CASE WHEN estado='cobrado' THEN minutos_total END), 0) AS prom_minutos,
+                COUNT(CASE WHEN estado='activo' THEN 1 END)                 AS activos_ahora
+            FROM sesiones WHERE DATE(hora_entrada) = ?
+        """, (hoy,)).fetchone()
+        return dict(row) if row else {}
+
+    def get_ingresos_semana(self) -> List[Dict]:
+        conn = self._conn()
+        rows = conn.execute("""
+            SELECT DATE(hora_entrada) AS fecha,
+                   COUNT(*)           AS vehiculos,
+                   COALESCE(SUM(monto), 0) AS ingresos
+            FROM sesiones
+            WHERE estado='cobrado' AND DATE(hora_entrada) >= DATE('now','-6 days')
+            GROUP BY DATE(hora_entrada) ORDER BY fecha ASC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_ingresos_mes_actual(self) -> List[Dict]:
+        conn = self._conn()
+        mes  = datetime.now().strftime("%Y-%m")
+        rows = conn.execute("""
+            SELECT DATE(hora_entrada) AS fecha,
+                   COUNT(*)           AS vehiculos,
+                   COALESCE(SUM(monto), 0) AS ingresos
+            FROM sesiones
+            WHERE estado='cobrado' AND strftime('%Y-%m', hora_entrada) = ?
+            GROUP BY DATE(hora_entrada) ORDER BY fecha ASC
+        """, (mes,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_ingresos_ultimos_meses(self, n: int = 6) -> List[Dict]:
+        conn = self._conn()
+        rows = conn.execute(f"""
+            SELECT strftime('%Y-%m', hora_entrada) AS mes,
+                   COUNT(*)                        AS vehiculos,
+                   COALESCE(SUM(monto), 0)         AS ingresos
+            FROM sesiones
+            WHERE estado='cobrado' AND hora_entrada >= DATE('now','-{n} months')
+            GROUP BY strftime('%Y-%m', hora_entrada) ORDER BY mes ASC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_por_tipo_hoy(self) -> List[Dict]:
+        conn = self._conn()
+        hoy  = datetime.now().strftime("%Y-%m-%d")
+        rows = conn.execute("""
+            SELECT tipo_vehiculo,
+                   COUNT(*)                AS cantidad,
+                   COALESCE(SUM(monto), 0) AS ingresos
+            FROM sesiones
+            WHERE estado='cobrado' AND DATE(hora_entrada) = ?
+            GROUP BY tipo_vehiculo ORDER BY cantidad DESC
+        """, (hoy,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_kpi_mes(self) -> Dict:
+        conn = self._conn()
+        mes  = datetime.now().strftime("%Y-%m")
+        row  = conn.execute("""
+            SELECT COUNT(*)                   AS total_vehiculos,
+                   COALESCE(SUM(monto), 0)    AS ingresos,
+                   COALESCE(AVG(minutos_total), 0) AS prom_minutos
+            FROM sesiones
+            WHERE estado='cobrado' AND strftime('%Y-%m', hora_entrada) = ?
+        """, (mes,)).fetchone()
+        return dict(row) if row else {}
+
+    def get_historial(self, limit: int = 100, offset: int = 0,
+                      fecha: str = None, placa: str = None) -> List[Dict]:
+        conn   = self._conn()
+        params: list = []
+        conds  = ["estado != 'activo'"]
+
+        if fecha:
+            conds.append("DATE(hora_entrada) = ?")
+            params.append(fecha)
+        if placa:
+            conds.append("placa LIKE ?")
+            params.append(f"%{placa.upper()}%")
+
+        where  = " AND ".join(conds)
+        params += [limit, offset]
+        rows   = conn.execute(
+            f"SELECT * FROM sesiones WHERE {where} ORDER BY hora_entrada DESC LIMIT ? OFFSET ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_totales_globales(self) -> Dict:
+        conn = self._conn()
+        row  = conn.execute("""
+            SELECT COUNT(*)               AS total_sesiones,
+                   COALESCE(SUM(monto),0) AS ingresos_totales,
+                   COALESCE(MAX(monto),0) AS ticket_maximo
+            FROM sesiones WHERE estado='cobrado'
+        """).fetchone()
+        return dict(row) if row else {}
