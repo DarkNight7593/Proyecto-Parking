@@ -109,7 +109,6 @@ class PanelConfiguracion(ctk.CTkFrame):
             val_tl = max(0, int(self._entry_tl.get().strip()))
             self.config.set("sistema", "tiempo_libre_min", str(val_tl))
             self._entry_tl.configure(border_color=C["border"])
-            # Sincronizar con pestaña Tarifas si existe
             if hasattr(self, "_entry_tl_tarifas"):
                 try:
                     self._entry_tl_tarifas.delete(0, "end")
@@ -244,6 +243,30 @@ class PanelConfiguracion(ctk.CTkFrame):
     def _build_tab_impresora(self, parent):
         self._imp_seleccionada: str = self.config.get_nombre_impresora()
 
+        # ── Botones de acción fijos en la parte inferior ──────────────────
+        # Se empaquetan ANTES que el scroll para que siempre estén visibles
+        btns_frame = ctk.CTkFrame(parent, fg_color=C["bg_dark"], corner_radius=0)
+        btns_frame.pack(side="bottom", fill="x", padx=4, pady=(4, 6))
+
+        btns_inner = ctk.CTkFrame(btns_frame, fg_color="transparent")
+        btns_inner.pack(pady=6)
+
+        ctk.CTkButton(
+            btns_inner, text="🔄  Actualizar Lista",
+            fg_color=C["bg_light"], hover_color=C["border"],
+            text_color=C["text_1"], font=fuente(12), height=40, width=180,
+            command=self._escanear,
+        ).pack(side="left", padx=5)
+
+        ctk.CTkButton(
+            btns_inner, text="🧪  Página de Prueba",
+            fg_color=C["bg_dark"], hover_color=C["bg_light"],
+            text_color=C["text_2"], font=fuente(12), height=40, width=160,
+            border_color=C["border"], border_width=1,
+            command=self._test_impresora,
+        ).pack(side="left", padx=5)
+
+        # ── Contenido scrollable ──────────────────────────────────────────
         scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent",
                                          scrollbar_fg_color=C["bg_light"])
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
@@ -266,86 +289,129 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._lbl_imp_activa.pack(side="left", fill="x", expand=True)
 
         ctk.CTkButton(
-            fila_act, text="🧪 Prueba de Impresión",
+            fila_act, text="🧪 Prueba",
             fg_color=C["bg_medium"], hover_color=C["bg_light"],
-            text_color=C["text_2"], font=fuente(11), height=34, width=160,
+            text_color=C["text_2"], font=fuente(11), height=34, width=100,
             command=self._test_impresora,
         ).pack(side="right")
 
         self._lbl_estado_imp = ctk.CTkLabel(
-            self._card_activa, text="...",
+            self._card_activa, text="Verificando estado real...",
             font=fuente(11), text_color=C["text_3"],
         )
         self._lbl_estado_imp.pack(anchor="w", padx=16, pady=(0, 10))
 
-        # ── Lista de impresoras instaladas ────────────────────────────────
+        # ── Lista de impresoras instaladas (scroll propio) ─────────────────
         self._seccion(scroll, "Impresoras Instaladas en Windows")
 
         ctk.CTkLabel(
             scroll,
             text="Selecciona la impresora que usarás como ticketera.\n"
-                 "Las marcadas ⭐ tienen driver Generic/Text Only, ideal para impresión térmica.",
+                 "⭐ = driver Generic/Text Only (ideal ESC/POS)  •  "
+                 "🔄 = cambiar driver a Generic (requiere Admin)",
             font=fuente(11), text_color=C["text_3"], justify="left",
-        ).pack(anchor="w", padx=10, pady=(0, 8))
+        ).pack(anchor="w", padx=10, pady=(0, 6))
 
-        self._frame_lista = ctk.CTkFrame(scroll, fg_color=C["bg_dark"],
-                                          corner_radius=12, border_color=C["border"],
-                                          border_width=1)
-        self._frame_lista.pack(fill="x", padx=4, pady=(0, 8))
+        # Frame con borde que contiene el scroll de la lista
+        lista_border = ctk.CTkFrame(scroll, fg_color=C["bg_dark"],
+                                     corner_radius=12, border_color=C["border"],
+                                     border_width=1)
+        lista_border.pack(fill="x", padx=4, pady=(0, 8))
+
+        self._frame_lista = ctk.CTkScrollableFrame(
+            lista_border, fg_color="transparent", corner_radius=10,
+            height=200,
+        )
+        self._frame_lista.pack(fill="x", padx=2, pady=2)
 
         ctk.CTkLabel(self._frame_lista, text="🔄  Cargando impresoras...",
                      font=fuente(12), text_color=C["text_3"]).pack(pady=20)
 
-        # ── Hardware sin driver ───────────────────────────────────────────
+        # ── Hardware sin driver (scroll propio) ───────────────────────────
         self._seccion(scroll, "Hardware USB Detectado sin Driver")
 
         ctk.CTkLabel(
             scroll,
             text="Si tu ticketera aparece aquí, instala el driver para poder seleccionarla.",
             font=fuente(11), text_color=C["text_3"],
-        ).pack(anchor="w", padx=10, pady=(0, 8))
+        ).pack(anchor="w", padx=10, pady=(0, 6))
 
-        self._frame_hw = ctk.CTkFrame(scroll, fg_color=C["bg_dark"],
-                                       corner_radius=12, border_color=C["border"],
-                                       border_width=1)
-        self._frame_hw.pack(fill="x", padx=4, pady=(0, 8))
+        hw_border = ctk.CTkFrame(scroll, fg_color=C["bg_dark"],
+                                  corner_radius=12, border_color=C["border"],
+                                  border_width=1)
+        hw_border.pack(fill="x", padx=4, pady=(0, 8))
+
+        self._frame_hw = ctk.CTkScrollableFrame(
+            hw_border, fg_color="transparent", corner_radius=10,
+            height=110,
+        )
+        self._frame_hw.pack(fill="x", padx=2, pady=2)
 
         ctk.CTkLabel(self._frame_hw, text="Presiona 🔄 Actualizar para detectar hardware",
                      font=fuente(11), text_color=C["text_3"]).pack(pady=14)
 
         # ── Log ───────────────────────────────────────────────────────────
-        self._seccion(scroll, "Registro")
+        self._seccion(scroll, "Registro de Actividad")
 
         self._txt_log = ctk.CTkTextbox(
             scroll, fg_color=C["bg_dark"], text_color=C["text_2"],
-            height=90, font=ctk.CTkFont("Courier", 10),
+            height=60, font=ctk.CTkFont("Courier", 10),
         )
-        self._txt_log.pack(fill="x", padx=4, pady=(0, 8))
-
-        # ── Botones ───────────────────────────────────────────────────────
-        btns = ctk.CTkFrame(scroll, fg_color="transparent")
-        btns.pack(pady=(0, 8))
-
-        ctk.CTkButton(
-            btns, text="🔄  Actualizar Lista",
-            fg_color=C["bg_light"], hover_color=C["border"],
-            text_color=C["text_1"], font=fuente(12), height=40, width=180,
-            command=self._escanear,
-        ).pack(side="left", padx=5)
-
-        ctk.CTkButton(
-            btns, text="🧪  Página de Prueba",
-            fg_color=C["bg_dark"], hover_color=C["bg_light"],
-            text_color=C["text_2"], font=fuente(12), height=40, width=160,
-            border_color=C["border"], border_width=1,
-            command=self._test_impresora,
-        ).pack(side="left", padx=5)
+        self._txt_log.pack(fill="x", padx=4, pady=(0, 4))
 
         self._log("Sistema listo. Presiona 🔄 Actualizar para ver las impresoras.")
 
-        # Auto-escanear
+        # Auto-escanear y verificar estado real
         self.after(300, self._escanear)
+        self.after(400, self._actualizar_estado_badge)
+        # Loop de verificación periódica del estado real de la impresora
+        self.after(15_000, self._loop_estado_imp)
+
+    # ─── Verificación de estado en tiempo real ────────────────────────────────
+
+    def _actualizar_estado_badge(self):
+        """
+        Actualiza el badge de la ticketera activa con estado REAL de Windows.
+        No usa el config guardado — consulta directamente al sistema.
+        """
+        try:
+            estado = self.printer.get_estado_detallado()
+            nivel  = estado["nivel"]
+            msg    = estado["mensaje"]
+
+            if nivel == "ok":
+                color_borde = C["green"]
+                color_txt   = C["green"]
+                color_titulo = C["green"]
+            elif nivel == "warning":
+                color_borde = C["yellow"]
+                color_txt   = C["yellow"]
+                color_titulo = C["text_1"]
+            elif nivel == "error":
+                color_borde = C["red"]
+                color_txt   = C["red"]
+                color_titulo = C["text_1"]
+                self._log(f"⚠ Error detectado: {msg}")
+            else:  # offline
+                color_borde = C["red"]
+                color_txt   = C["red"]
+                color_titulo = C["text_3"]
+
+            self._lbl_estado_imp.configure(text=msg, text_color=color_txt)
+            self._card_activa.configure(border_color=color_borde)
+            self._lbl_imp_activa.configure(
+                text=f"🖨️  {self._imp_seleccionada}",
+                text_color=color_titulo,
+            )
+        except Exception:
+            pass
+
+    def _loop_estado_imp(self):
+        """Loop periódico de verificación del estado de la impresora (cada 15 s)."""
+        if not self.winfo_exists():
+            return
         self._actualizar_estado_badge()
+        self.after(15_000, self._loop_estado_imp)
 
     # ─── Selección de impresora ───────────────────────────────────────────────
 
@@ -353,38 +419,20 @@ class PanelConfiguracion(ctk.CTkFrame):
         """Guarda la impresora seleccionada y actualiza la UI."""
         self._imp_seleccionada = nombre
         self.config.set("impresora", "nombre", nombre)
+        # Actualizar la instancia de printer en el panel
+        from printer import Printer
+        self.printer = Printer(nombre)
         self._log(f"✅ Impresora seleccionada: {nombre}")
         self._lbl_imp_activa.configure(text=f"🖨️  {nombre}")
         self._actualizar_estado_badge()
         if self.on_guardado:
             self.on_guardado()
-        # Re-renderizar la lista para actualizar badges ✓
         self._escanear()
-
-    def _actualizar_estado_badge(self):
-        """Actualiza el label de estado de la ticketera activa."""
-        try:
-            inst = PrinterInstaller(self._imp_seleccionada)
-            if inst.impresora_ya_instalada():
-                self._lbl_estado_imp.configure(
-                    text="✓ Instalada y disponible en Windows",
-                    text_color=C["green"],
-                )
-                self._card_activa.configure(border_color=C["green"])
-            else:
-                self._lbl_estado_imp.configure(
-                    text="⚠ No encontrada — selecciona otra o instala el driver",
-                    text_color=C["yellow"],
-                )
-                self._card_activa.configure(border_color=C["yellow"])
-        except Exception:
-            pass
 
     # ─── Escaneo en background ────────────────────────────────────────────────
 
     def _escanear(self):
         """Lanza el escaneo de impresoras en un hilo daemon."""
-        # Mostrar indicador de carga
         for w in self._frame_lista.winfo_children():
             w.destroy()
         ctk.CTkLabel(self._frame_lista, text="🔄  Escaneando...",
@@ -392,14 +440,14 @@ class PanelConfiguracion(ctk.CTkFrame):
 
         for w in self._frame_hw.winfo_children():
             w.destroy()
-        ctk.CTkLabel(self._frame_hw, text="🔄  Escaneando...",
-                     font=fuente(12), text_color=C["yellow"]).pack(pady=14)
+        ctk.CTkLabel(self._frame_hw, text="🔄  Escaneando hardware...",
+                     font=fuente(11), text_color=C["yellow"]).pack(pady=14)
 
         self._log("Buscando impresoras instaladas y hardware USB...")
         threading.Thread(target=self._scan_worker, daemon=True).start()
 
     def _scan_worker(self):
-        inst = PrinterInstaller(self._imp_seleccionada)
+        inst       = PrinterInstaller(self._imp_seleccionada)
         impresoras = inst.listar_impresoras_detalle()
         hardware   = inst.listar_hardware_sin_driver()
         self.after(0, lambda: self._mostrar_resultados(impresoras, hardware))
@@ -442,11 +490,12 @@ class PanelConfiguracion(ctk.CTkFrame):
 
     def _render_imp_card(self, imp: Dict):
         """Tarjeta para cada impresora instalada."""
-        nombre      = imp["nombre"]
-        driver      = imp["driver"]
-        puerto      = imp["puerto"]
-        es_compat   = imp["es_compatible_termica"]
-        es_activa   = (nombre == self._imp_seleccionada)
+        nombre    = imp["nombre"]
+        driver    = imp["driver"]
+        puerto    = imp["puerto"]
+        es_compat = imp["es_compatible_termica"]
+        es_ticket = imp["es_ticketera"]
+        es_activa = (nombre == self._imp_seleccionada)
 
         border_color = C["green"] if es_activa else (C["blue"] if es_compat else C["border"])
         border_w     = 2 if (es_activa or es_compat) else 1
@@ -469,33 +518,48 @@ class PanelConfiguracion(ctk.CTkFrame):
                      anchor="w").pack(side="left")
 
         if es_compat:
-            badge = ctk.CTkLabel(top_row, text="⭐ Recomendada",
-                                  font=fuente(9, bold=True),
-                                  fg_color=C["blue"], text_color="white",
-                                  corner_radius=8, width=100, height=20)
-            badge.pack(side="left", padx=(10, 0))
+            ctk.CTkLabel(top_row, text="⭐ Recomendada",
+                          font=fuente(9, bold=True),
+                          fg_color=C["blue"], text_color="white",
+                          corner_radius=8, width=100, height=20,
+                          ).pack(side="left", padx=(10, 0))
+        elif es_ticket:
+            # Ticketera con driver no-Generic: indicar que puede no funcionar bien
+            ctk.CTkLabel(top_row, text="⚠ Driver propio",
+                          font=fuente(9, bold=True),
+                          fg_color=C["yellow_h"], text_color="white",
+                          corner_radius=8, width=100, height=20,
+                          ).pack(side="left", padx=(10, 0))
 
         ctk.CTkLabel(left,
                      text=f"Driver: {driver}   •   Puerto: {puerto}",
                      font=fuente(10), text_color=C["text_3"],
                      anchor="w").pack(fill="x", pady=(2, 0))
 
-        # Derecha: botón o check
+        # Derecha: botones
         right = ctk.CTkFrame(card, fg_color="transparent")
         right.pack(side="right", padx=14, pady=10)
 
         if es_activa:
             ctk.CTkLabel(right, text="✓ Seleccionada",
                          font=fuente(11, bold=True), text_color=C["green"]).pack()
-        else:
-            btn_color = C["blue"] if es_compat else C["bg_light"]
-            btn_hover = C["blue_h"] if es_compat else C["border"]
+        elif es_compat:
+            # Generic/Text Only → puede seleccionarse directamente
             ctk.CTkButton(
                 right, text="Seleccionar",
-                fg_color=btn_color, hover_color=btn_hover,
+                fg_color=C["blue"], hover_color=C["blue_h"],
                 text_color="white", font=fuente(11, bold=True),
-                width=110, height=34, corner_radius=8,
+                width=130, height=32, corner_radius=8,
                 command=lambda n=nombre: self._seleccionar_impresora(n),
+            ).pack()
+        else:
+            # Driver no compatible — ofrecer cambio a Generic en lugar de Seleccionar
+            ctk.CTkButton(
+                right, text="🔧 Cambiar Driver\n(Admin)",
+                fg_color="#7c2d12", hover_color="#9a3412",
+                text_color="white", font=fuente(10, bold=True),
+                width=130, height=42, corner_radius=8,
+                command=lambda n=nombre: self._cambiar_driver_generico(n),
             ).pack()
 
     def _render_hw_card(self, dev: Dict):
@@ -517,12 +581,64 @@ class PanelConfiguracion(ctk.CTkFrame):
                      anchor="w").pack(fill="x")
 
         ctk.CTkButton(
-            card, text="🛡️ Instalar Driver\n(Admin)",
+            card, text="🛡️ Instalar\n(Admin)",
             fg_color="#ea580c", hover_color="#c2410c",
-            text_color="white", font=fuente(11, bold=True),
-            width=130, height=44, corner_radius=8,
+            text_color="white", font=fuente(10, bold=True),
+            width=110, height=42, corner_radius=8,
             command=lambda n=nombre: self._instalar_driver_admin(n),
         ).pack(side="right", padx=14, pady=10)
+
+    # ─── Cambiar driver a Generic ─────────────────────────────────────────────
+
+    def _cambiar_driver_generico(self, nombre_impresora: str):
+        """
+        Cambia el driver de una impresora ticketera a Generic/Text Only.
+        Necesario para que ESC/POS funcione con impresoras que tienen driver propio.
+        """
+        if not messagebox.askyesno(
+            "Cambiar Driver a Generic/Text Only",
+            f"Se cambiará el driver de:\n\n  {nombre_impresora}\n\n"
+            "al driver  Generic / Text Only  (ideal para ESC/POS térmico).\n\n"
+            "Windows pedirá permisos de Administrador.\n"
+            "⚠ Si el driver propio tiene funciones especiales, se perderán.\n\n"
+            "¿Continuar?",
+        ):
+            return
+
+        self._log(f"Iniciando cambio de driver para: {nombre_impresora}...")
+
+        def _run():
+            inst  = PrinterInstaller(nombre_impresora)
+            exito = inst.cambiar_driver_generico(
+                nombre_impresora,
+                log=lambda m: self.after(0, self._log, m),
+            )
+
+            def _ui():
+                if not self.winfo_exists():
+                    return
+                if exito:
+                    self._log(f"✅ Driver cambiado. '{nombre_impresora}' ahora usa Generic/Text Only.")
+                    messagebox.showinfo(
+                        "Driver Actualizado",
+                        f"'{nombre_impresora}' ahora usa Generic / Text Only.\n"
+                        "Puedes seleccionarla para usarla como ticketera.",
+                    )
+                    self._escanear()
+                else:
+                    messagebox.showerror(
+                        "Error",
+                        "No se pudo cambiar el driver.\n\n"
+                        "Posibles causas:\n"
+                        "• Rechazaste el permiso de Administrador\n"
+                        "• La impresora está en uso\n"
+                        "• Windows bloqueó el cambio\n\n"
+                        "Intenta de nuevo o hazlo manualmente en:\n"
+                        "Dispositivos e Impresoras → Propiedades → Avanzadas → Driver",
+                    )
+            self.after(0, _ui)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     # ─── Instalación de driver ────────────────────────────────────────────────
 
@@ -537,8 +653,9 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._log(f"Iniciando instalación como Admin para: {nombre_modelo}...")
 
         def _run():
-            inst = PrinterInstaller(nombre_modelo)
+            inst  = PrinterInstaller(nombre_modelo)
             exito = inst.instalar_como_admin(nombre_modelo, log=lambda m: self.after(0, self._log, m))
+
             def _ui():
                 if not self.winfo_exists():
                     return

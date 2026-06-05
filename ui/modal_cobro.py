@@ -14,11 +14,28 @@ from ui.theme import C, fuente, color_tipo, hover_tipo, emoji_tipo, TIPO_POR_NOM
 # ─── Funciones auxiliares ─────────────────────────────────────────────────────
 
 def calcular_monto(minutos: int, tarifa_hora: float, tiempo_libre: int = 0) -> float:
-    """Calcula el monto a cobrar según minutos y tarifa por hora."""
-    minutos_cobrables = max(0, minutos - tiempo_libre)
-    if minutos_cobrables <= 0:
+    """
+    Calcula el monto a cobrar según minutos y tarifa por hora.
+
+    Lógica de horas completas con tolerancia como gracia por ciclo:
+    - Si minutos <= tiempo_libre → gratis (período de tolerancia inicial).
+    - A partir de ahí se cobra en horas COMPLETAS, nunca fracciones:
+        · 1 min cobrables  →  1 hora
+        · 59 min cobrables →  1 hora
+        · 60 min cobrables →  2 horas   ← hora consumida; empieza la siguiente
+        · 61 min cobrables →  2 horas
+        · 119 min cobrables → 2 horas
+        · 120 min cobrables → 3 horas
+    - Con tolerancia=5:  límites totales en 65, 125, 185 min…
+      · 6–64 min  = 1 hora
+      · 65 min    = 2 horas   ("1h con 5 min ya paga dos horas")
+      · 66–124 min = 2 horas
+    """
+    if minutos <= tiempo_libre:
         return 0.0
-    return round((minutos_cobrables / 60.0) * tarifa_hora, 2)
+    minutos_cobrables = minutos - tiempo_libre          # > 0 garantizado
+    horas = minutos_cobrables // 60 + 1                 # horas completas consumidas
+    return round(horas * tarifa_hora, 2)
 
 
 def formatear_tiempo(minutos: int) -> str:
@@ -101,7 +118,7 @@ class ModalCobro(ctk.CTkToplevel):
         ctk.CTkLabel(
             hdr,
             text=f"Ticket: {self.sesion['ticket_numero']}",
-            font=fuente(11), text_color="rgba(255,255,255,0.75)",
+            font=fuente(11), text_color="#c8daf5",
         ).place(relx=0.5, rely=0.78, anchor="center")
 
         # Cuerpo
@@ -171,7 +188,8 @@ class ModalCobro(ctk.CTkToplevel):
         ctk.CTkCheckBox(
             body, text="Imprimir ticket de salida",
             variable=self._var_imprimir,
-            checkbox_color=self._color, hover_color=self._hover,
+            fg_color=self._color, hover_color=self._hover,
+            checkmark_color="white",
             text_color=C["text_2"], font=fuente(12),
         ).pack(pady=(14, 0))
 

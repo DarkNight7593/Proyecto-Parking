@@ -1,9 +1,15 @@
 """
 ParkingPro - Asistente de primera configuración
 Pasos: Datos del negocio → Selección de ticketera → Listo
+
+Cambios respecto a la versión anterior:
+  • Paso 2 tiene scroll general + scrolls internos (lista, hardware)
+  • Estado inicial: ninguna impresora seleccionada (no pre-selecciona el default)
+  • Impresoras con driver no-Generic muestran botón "Cambiar Driver"
 """
 import threading
 import customtkinter as ctk
+from tkinter import messagebox
 from typing import Callable, List, Dict, Optional
 
 from ui.theme import C, fuente
@@ -29,7 +35,10 @@ class VentanaSetup(ctk.CTkToplevel):
 
         self._paso_actual         = 0
         self._entries_negocio     = {}
-        self._imp_seleccionada: Optional[str] = config.get_nombre_impresora()
+
+        # ── Inicio sin impresora preseleccionada ─────────────────────────────
+        # No mostramos la que viene en config (puede ser el placeholder por default)
+        self._imp_seleccionada: Optional[str] = None
 
         self.title("ParkingPro — Configuración Inicial")
         self.geometry(f"{self.ANCHO}x{self.ALTO}")
@@ -67,7 +76,7 @@ class VentanaSetup(ctk.CTkToplevel):
         self._frame_pasos.pack(fill="x", padx=50, pady=(18, 0))
         self._frame_pasos.pack_propagate(False)
 
-        # Botones de navegación (fijados abajo primero)
+        # Botones de navegación (fijados abajo)
         nav = ctk.CTkFrame(self, fg_color=C["bg_dark"], height=62)
         nav.pack(side="bottom", fill="x", padx=26, pady=(0, 18))
         nav.pack_propagate(False)
@@ -174,62 +183,126 @@ class VentanaSetup(ctk.CTkToplevel):
         fila_m.pack(fill="x", padx=36, pady=5)
         ctk.CTkLabel(fila_m, text="Símbolo de moneda", font=fuente(12),
                      text_color=C["text_2"], width=240, anchor="w").pack(side="left")
-        self._entry_moneda = ctk.CTkEntry(fila_m, fg_color=C["bg_dark"], border_color=C["border"],
+        self._entry_moneda = ctk.CTkEntry(fila_m, fg_color=C["bg_dark"],
+                                           border_color=C["border"],
                                            text_color=C["text_1"], height=38, width=280)
         self._entry_moneda.insert(0, self.config.get_moneda())
         self._entry_moneda.pack(side="right")
 
     # ── Paso 1: Selección de ticketera ─────────────────────────────────────────
+    #   Estructura:
+    #     _frame_contenido
+    #       └─ scroll_outer (CTkScrollableFrame — scroll general)
+    #            ├─ título + descripción + label selección
+    #            ├─ lista_border (frame con borde)
+    #            │    └─ _setup_frame_lista (CTkScrollableFrame — scroll lista)
+    #            ├─ label "Hardware sin driver"
+    #            ├─ hw_border (frame con borde)
+    #            │    └─ _setup_frame_hw (CTkScrollableFrame — scroll hardware)
+    #            └─ _setup_log (TextBox)
 
     def _paso_impresora(self):
         f = self._frame_contenido
 
-        ctk.CTkLabel(f, text="Selecciona tu Ticketera",
-                     font=fuente(18, bold=True), text_color=C["text_1"]).pack(pady=(18, 2))
-        ctk.CTkLabel(
-            f,
-            text="Selecciona la impresora instalada que usarás.\n"
-                 "Las marcadas ⭐ tienen driver Generic/Text Only, ideal para térmicas.",
-            font=fuente(12), text_color=C["text_2"], justify="center",
-        ).pack(pady=(0, 12))
+        # ── Scroll general (contenedor principal del paso) ────────────────────
+        scroll_outer = ctk.CTkScrollableFrame(
+            f, fg_color="transparent",
+            scrollbar_fg_color=C["bg_light"],
+        )
+        scroll_outer.pack(fill="both", expand=True, padx=2, pady=2)
 
-        # Label de selección actual
+        # ── Encabezado ────────────────────────────────────────────────────────
+        ctk.CTkLabel(
+            scroll_outer, text="Selecciona tu Ticketera",
+            font=fuente(18, bold=True), text_color=C["text_1"],
+        ).pack(pady=(14, 2))
+
+        ctk.CTkLabel(
+            scroll_outer,
+            text=(
+                "Selecciona la impresora instalada que usarás.\n"
+                "Las marcadas ⭐ tienen driver Generic/Text Only, ideal para térmicas.\n"
+                "Las marcadas ⚠ tienen driver propio — usa 🔄 Cambiar Driver para ESC/POS."
+            ),
+            font=fuente(11), text_color=C["text_2"], justify="center",
+        ).pack(pady=(0, 8))
+
+        # ── Label de selección actual ─────────────────────────────────────────
         self._lbl_imp_sel = ctk.CTkLabel(
-            f,
-            text=f"Seleccionada: {self._imp_seleccionada or '(ninguna)'}",
+            scroll_outer,
+            text="Ninguna impresora seleccionada",
             font=fuente(12, bold=True),
-            text_color=C["green"] if self._imp_seleccionada else C["text_3"],
+            text_color=C["text_3"],
         )
         self._lbl_imp_sel.pack(pady=(0, 8))
 
-        # Frame lista (scrollable)
+        # ── Sección: Lista de impresoras instaladas ───────────────────────────
+        self._sec_label(scroll_outer, "Impresoras Instaladas en Windows")
+
+        lista_border = ctk.CTkFrame(
+            scroll_outer, fg_color=C["bg_dark"],
+            corner_radius=10, border_color=C["border"], border_width=1,
+        )
+        lista_border.pack(fill="x", padx=10, pady=(0, 8))
+
         self._setup_frame_lista = ctk.CTkScrollableFrame(
-            f, fg_color=C["bg_dark"], corner_radius=10, height=220,
+            lista_border, fg_color="transparent", corner_radius=8,
+            height=180,
         )
-        self._setup_frame_lista.pack(fill="x", padx=24, pady=(0, 8))
+        self._setup_frame_lista.pack(fill="x", padx=2, pady=2)
 
-        ctk.CTkLabel(self._setup_frame_lista, text="🔄  Buscando impresoras...",
-                     font=fuente(12), text_color=C["yellow"]).pack(pady=24)
+        ctk.CTkLabel(
+            self._setup_frame_lista, text="🔄  Buscando impresoras...",
+            font=fuente(12), text_color=C["yellow"],
+        ).pack(pady=20)
 
-        # Sección hardware sin driver
-        ctk.CTkLabel(f, text="Hardware sin Driver (instala para poder seleccionarlo):",
-                     font=fuente(10, bold=True), text_color=C["text_3"],
-                     anchor="w").pack(fill="x", padx=24, pady=(4, 2))
+        # ── Sección: Hardware sin driver ──────────────────────────────────────
+        self._sec_label(
+            scroll_outer,
+            "Hardware USB sin Driver  (instala para poder seleccionarlo)",
+        )
 
-        self._setup_frame_hw = ctk.CTkFrame(f, fg_color=C["bg_dark"], corner_radius=8)
-        self._setup_frame_hw.pack(fill="x", padx=24, pady=(0, 6))
-        ctk.CTkLabel(self._setup_frame_hw, text="Escaneando...",
-                     font=fuente(10), text_color=C["text_3"]).pack(pady=8)
+        hw_border = ctk.CTkFrame(
+            scroll_outer, fg_color=C["bg_dark"],
+            corner_radius=10, border_color=C["border"], border_width=1,
+        )
+        hw_border.pack(fill="x", padx=10, pady=(0, 8))
 
-        # Log mini
+        self._setup_frame_hw = ctk.CTkScrollableFrame(
+            hw_border, fg_color="transparent", corner_radius=8,
+            height=90,
+        )
+        self._setup_frame_hw.pack(fill="x", padx=2, pady=2)
+
+        ctk.CTkLabel(
+            self._setup_frame_hw, text="Escaneando hardware USB...",
+            font=fuente(10), text_color=C["text_3"],
+        ).pack(pady=10)
+
+        # ── Log mini ─────────────────────────────────────────────────────────
+        self._sec_label(scroll_outer, "Registro de actividad")
+
         self._setup_log = ctk.CTkTextbox(
-            f, fg_color=C["bg_dark"], text_color=C["text_3"],
-            height=36, font=ctk.CTkFont("Courier", 10),
+            scroll_outer, fg_color=C["bg_dark"], text_color=C["text_3"],
+            height=52, font=ctk.CTkFont("Courier", 10),
         )
-        self._setup_log.pack(fill="x", padx=24, pady=(0, 6))
+        self._setup_log.pack(fill="x", padx=10, pady=(0, 10))
+        self._setup_log.configure(state="disabled")
 
-        # Escanear
+        # Escanear en background
         threading.Thread(target=self._scan_setup, daemon=True).start()
+
+    # ── Helper de sección ────────────────────────────────────────────────────
+
+    def _sec_label(self, parent, titulo: str):
+        f = ctk.CTkFrame(parent, fg_color="transparent")
+        f.pack(fill="x", padx=10, pady=(8, 4))
+        ctk.CTkLabel(f, text=titulo, font=fuente(11, bold=True),
+                     text_color=C["text_3"], anchor="w").pack(side="left")
+        ctk.CTkFrame(f, fg_color=C["border"], height=1).pack(
+            side="left", fill="x", expand=True, padx=(8, 0), pady=6)
+
+    # ── Escaneo ───────────────────────────────────────────────────────────────
 
     def _scan_setup(self):
         inst = PrinterInstaller()
@@ -248,9 +321,11 @@ class VentanaSetup(ctk.CTkToplevel):
         if not impresoras:
             ctk.CTkLabel(
                 self._setup_frame_lista,
-                text="❌  No se encontraron impresoras instaladas.\n"
-                     "Instala tu ticketera en Windows primero o\n"
-                     "usa el botón de instalación de driver más abajo.",
+                text=(
+                    "❌  No se encontraron impresoras instaladas.\n"
+                    "Instala tu ticketera en Windows primero o\n"
+                    "usa el botón de instalación de driver más abajo."
+                ),
                 font=fuente(11), text_color=C["red"],
             ).pack(pady=20)
         else:
@@ -265,9 +340,11 @@ class VentanaSetup(ctk.CTkToplevel):
             w.destroy()
 
         if not hardware:
-            ctk.CTkLabel(self._setup_frame_hw,
-                         text="✓ Sin hardware pendiente de driver",
-                         font=fuente(10), text_color=C["text_3"]).pack(pady=8)
+            ctk.CTkLabel(
+                self._setup_frame_hw,
+                text="✓ Sin hardware pendiente de driver",
+                font=fuente(10), text_color=C["text_3"],
+            ).pack(pady=10)
         else:
             for dev in hardware:
                 self._render_setup_hw_card(dev)
@@ -276,6 +353,7 @@ class VentanaSetup(ctk.CTkToplevel):
         nombre    = imp["nombre"]
         driver    = imp["driver"]
         es_compat = imp["es_compatible_termica"]
+        es_ticket = imp.get("es_ticketera", False)
         es_activa = (nombre == self._imp_seleccionada)
 
         border_c = C["green"] if es_activa else (C["blue"] if es_compat else C["border"])
@@ -286,6 +364,7 @@ class VentanaSetup(ctk.CTkToplevel):
                              border_color=border_c, border_width=border_w)
         card.pack(fill="x", padx=6, pady=3)
 
+        # Izquierda: info
         left = ctk.CTkFrame(card, fg_color="transparent")
         left.pack(side="left", fill="x", expand=True, padx=12, pady=8)
 
@@ -302,11 +381,17 @@ class VentanaSetup(ctk.CTkToplevel):
                           font=fuente(9), fg_color=C["blue"],
                           text_color="white", corner_radius=6,
                           width=90, height=18).pack(side="left", padx=8)
+        elif es_ticket:
+            ctk.CTkLabel(top, text="⚠ Driver propio",
+                          font=fuente(9), fg_color=C["yellow_h"],
+                          text_color="white", corner_radius=6,
+                          width=90, height=18).pack(side="left", padx=8)
 
-        ctk.CTkLabel(left, text=f"Driver: {driver[:50]}",
+        ctk.CTkLabel(left, text=f"Driver: {driver[:52]}",
                      font=fuente(10), text_color=C["text_3"],
                      anchor="w").pack(fill="x")
 
+        # Derecha: botones
         right = ctk.CTkFrame(card, fg_color="transparent")
         right.pack(side="right", padx=12, pady=8)
 
@@ -324,23 +409,41 @@ class VentanaSetup(ctk.CTkToplevel):
                 command=lambda n=nombre: self._seleccionar_imp_setup(n),
             ).pack()
 
+            # Botón "Cambiar Driver" para ticketeras con driver propio (no-Generic)
+            if not es_compat and es_ticket:
+                ctk.CTkButton(
+                    right, text="🔄 Cambiar Driver",
+                    fg_color="#7c2d12", hover_color="#9a3412",
+                    text_color="white", font=fuente(10, bold=True),
+                    width=120, height=26, corner_radius=8,
+                    command=lambda n=nombre: self._cambiar_driver_setup(n),
+                ).pack(pady=(4, 0))
+
     def _render_setup_hw_card(self, dev: Dict):
         nombre = dev.get("nombre", "Desconocido")
         card = ctk.CTkFrame(self._setup_frame_hw, fg_color=C["bg_medium"],
                              corner_radius=6, border_color=C["yellow"], border_width=1)
         card.pack(fill="x", padx=6, pady=2)
 
-        ctk.CTkLabel(card, text=f"⚡ {nombre} — sin driver",
-                     font=fuente(11), text_color=C["yellow"],
-                     anchor="w").pack(side="left", padx=12, pady=6)
+        left = ctk.CTkFrame(card, fg_color="transparent")
+        left.pack(side="left", fill="x", expand=True, padx=12, pady=6)
+
+        ctk.CTkLabel(left, text=f"🖨️  {nombre}",
+                     font=fuente(11, bold=True), text_color=C["yellow"],
+                     anchor="w").pack(fill="x")
+        ctk.CTkLabel(left, text="Sin driver — necesita instalación",
+                     font=fuente(10), text_color=C["text_3"],
+                     anchor="w").pack(fill="x")
 
         ctk.CTkButton(
-            card, text="🛡️ Instalar (Admin)",
+            card, text="🛡️ Instalar\n(Admin)",
             fg_color="#ea580c", hover_color="#c2410c",
             text_color="white", font=fuente(10, bold=True),
-            width=140, height=28,
+            width=110, height=40,
             command=lambda n=nombre: self._instalar_driver_setup(n),
         ).pack(side="right", padx=10, pady=6)
+
+    # ── Acciones sobre impresoras ─────────────────────────────────────────────
 
     def _seleccionar_imp_setup(self, nombre: str):
         self._imp_seleccionada = nombre
@@ -350,15 +453,54 @@ class VentanaSetup(ctk.CTkToplevel):
         # Re-renderizar para actualizar badges
         threading.Thread(target=self._scan_setup, daemon=True).start()
 
+    def _cambiar_driver_setup(self, nombre_impresora: str):
+        """
+        Cambia el driver de una impresora a Generic / Text Only (necesita Admin).
+        Igual que la opción equivalente en el panel de Configuración.
+        """
+        if not messagebox.askyesno(
+            "Cambiar Driver a Generic/Text Only",
+            f"Se cambiará el driver de:\n\n  {nombre_impresora}\n\n"
+            "al driver  Generic / Text Only  (ideal para ESC/POS térmico).\n\n"
+            "Windows pedirá permisos de Administrador.\n"
+            "⚠ Si el driver propio tiene funciones especiales, se perderán.\n\n"
+            "¿Continuar?",
+        ):
+            return
+
+        self._setup_log_append(f"Iniciando cambio de driver para: {nombre_impresora}...")
+
+        def _run():
+            inst = PrinterInstaller(nombre_impresora)
+            exito = inst.cambiar_driver_generico(
+                nombre_impresora,
+                log=lambda m: self.after(0, self._setup_log_append, m),
+            )
+
+            def _ui():
+                if not self.winfo_exists():
+                    return
+                if exito:
+                    self._setup_log_append(
+                        f"✅ Driver cambiado. Ahora puedes seleccionarla.")
+                    self._seleccionar_imp_setup(nombre_impresora)
+                else:
+                    self._setup_log_append("❌ No se pudo cambiar el driver.")
+
+            self.after(0, _ui)
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _instalar_driver_setup(self, nombre_modelo: str):
         self._setup_log_append(f"Instalando driver para: {nombre_modelo}...")
 
         def _run():
-            inst = PrinterInstaller(nombre_modelo)
+            inst  = PrinterInstaller(nombre_modelo)
             exito = inst.instalar_como_admin(
                 nombre_modelo,
                 log=lambda m: self.after(0, self._setup_log_append, m),
             )
+
             def _ui():
                 if not self.winfo_exists():
                     return
@@ -366,6 +508,7 @@ class VentanaSetup(ctk.CTkToplevel):
                     self._seleccionar_imp_setup(nombre_modelo)
                 else:
                     self._setup_log_append("❌ Instalación fallida. Intenta manualmente.")
+
             self.after(0, _ui)
 
         threading.Thread(target=_run, daemon=True).start()
@@ -397,10 +540,14 @@ class VentanaSetup(ctk.CTkToplevel):
         ).pack(pady=16)
 
         datos = self.config.get_datos_negocio()
-        imp   = self._imp_seleccionada or self.config.get_nombre_impresora()
+        if self._imp_seleccionada:
+            imp_texto = self._imp_seleccionada
+        else:
+            imp_texto = "(Ninguna — configura en ⚙️ Ajustes)"
+
         resumen = (
             f"🏢  Negocio:    {datos['nombre']}\n"
-            f"🖨️  Impresora: {imp}\n"
+            f"🖨️  Impresora: {imp_texto}\n"
             f"💵  Moneda:    {self.config.get_moneda()}"
         )
         card = ctk.CTkFrame(f, fg_color=C["bg_dark"], corner_radius=12)
@@ -426,6 +573,7 @@ class VentanaSetup(ctk.CTkToplevel):
                 self.config.set("sistema", "moneda", moneda)
 
         elif self._paso_actual == 1:
+            # Solo guardar si el usuario eligió una impresora
             if self._imp_seleccionada:
                 self.config.set("impresora", "nombre", self._imp_seleccionada)
 

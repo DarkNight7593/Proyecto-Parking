@@ -4,6 +4,7 @@ Punto de entrada: inicializa dependencias y lanza la ventana principal.
 """
 import sys
 import os
+import threading
 import customtkinter as ctk
 from datetime import datetime
 
@@ -54,12 +55,13 @@ class ParkingProApp(ctk.CTk):
         self._panel_activo = None
         self._nav_btns: dict = {}
         self._nav_actual: str = ""
+        self._ultimo_error_imp: str = ""
 
         # ── UI ────────────────────────────────────────────────────────────
         self._build_layout()
         self._navegar("principal")
         self._loop_reloj()
-        self._loop_printer_status()
+        self._loop_printer_status()   # primera comprobación al arrancar
 
         if self.cfg.es_primera_vez():
             self.after(600, self._mostrar_setup)
@@ -98,10 +100,12 @@ class ParkingProApp(ctk.CTk):
         self._lbl_reloj = ctk.CTkLabel(reloj_f, text="--:--:--",
                                         font=fuente(24, bold=True), text_color=C["text_1"])
         self._lbl_reloj.pack()
-        self._lbl_fecha = ctk.CTkLabel(reloj_f, text="", font=fuente(10), text_color=C["text_3"])
+        self._lbl_fecha = ctk.CTkLabel(reloj_f, text="", font=fuente(10),
+                                        text_color=C["text_3"])
         self._lbl_fecha.pack(pady=(2, 0))
 
-        ctk.CTkFrame(sb, fg_color=C["border"], height=1).pack(fill="x", padx=14, pady=(12, 4))
+        ctk.CTkFrame(sb, fg_color=C["border"], height=1).pack(fill="x", padx=14,
+                                                                pady=(12, 4))
 
         # Navegación
         ctk.CTkLabel(sb, text="MENÚ PRINCIPAL", font=fuente(9),
@@ -127,31 +131,62 @@ class ParkingProApp(ctk.CTk):
             self._nav_btns[key] = btn
 
         # KPI activos
-        ctk.CTkFrame(sb, fg_color=C["border"], height=1).pack(fill="x", padx=14, pady=(10, 6))
+        ctk.CTkFrame(sb, fg_color=C["border"], height=1).pack(fill="x", padx=14,
+                                                                pady=(10, 6))
         frame_kpi = ctk.CTkFrame(sb, fg_color=C["bg_medium"], corner_radius=10)
         frame_kpi.pack(fill="x", padx=12, pady=(0, 4))
         ctk.CTkLabel(frame_kpi, text="Vehículos activos", font=fuente(10),
                      text_color=C["text_3"]).pack(anchor="w", padx=12, pady=(8, 0))
         self._lbl_activos_sb = ctk.CTkLabel(frame_kpi, text="0",
-                                             font=fuente(26, bold=True), text_color=C["blue"])
+                                             font=fuente(26, bold=True),
+                                             text_color=C["blue"])
         self._lbl_activos_sb.pack(padx=12, pady=(0, 8))
 
-        # Espaciador
+        # Espaciador flexible
         ctk.CTkFrame(sb, fg_color="transparent").pack(fill="both", expand=True)
 
-        # Estado impresora
-        ctk.CTkFrame(sb, fg_color=C["border"], height=1).pack(fill="x", padx=14, pady=(0, 8))
-        frame_imp = ctk.CTkFrame(sb, fg_color=C["bg_medium"], corner_radius=10)
-        frame_imp.pack(fill="x", padx=12, pady=(0, 6))
-        ctk.CTkLabel(frame_imp, text="🖨️  Ticketera", font=fuente(11, bold=True),
-                     text_color=C["text_2"]).pack(anchor="w", padx=12, pady=(8, 2))
-        self._lbl_printer = ctk.CTkLabel(frame_imp, text="...", font=fuente(10),
-                                          text_color=C["text_3"])
-        self._lbl_printer.pack(anchor="w", padx=12, pady=(0, 8))
+        # ── Badge de impresora (rediseñado) ───────────────────────────────
+        ctk.CTkFrame(sb, fg_color=C["border"], height=1).pack(fill="x", padx=14,
+                                                                pady=(0, 6))
+
+        self._frame_imp = ctk.CTkFrame(sb, fg_color=C["bg_medium"], corner_radius=10)
+        self._frame_imp.pack(fill="x", padx=12, pady=(0, 6))
+
+        # Fila superior: icono de color + "Ticketera"
+        fila_top = ctk.CTkFrame(self._frame_imp, fg_color="transparent")
+        fila_top.pack(fill="x", padx=10, pady=(8, 2))
+
+        self._badge_printer_icon = ctk.CTkLabel(
+            fila_top,
+            text="🖨️",
+            font=ctk.CTkFont("Helvetica", 18),
+            fg_color=C["bg_dark"],
+            corner_radius=6,
+            width=34, height=34,
+            text_color=C["text_3"],
+        )
+        self._badge_printer_icon.pack(side="left")
+
+        ctk.CTkLabel(
+            fila_top, text="Ticketera",
+            font=fuente(11, bold=True), text_color=C["text_2"], anchor="w",
+        ).pack(side="left", padx=(7, 0))
+
+        # Fila inferior: mensaje de estado (ancho completo, sin recorte)
+        self._lbl_printer = ctk.CTkLabel(
+            self._frame_imp,
+            text="Verificando...",
+            font=fuente(9),
+            text_color=C["text_3"],
+            anchor="w",
+            wraplength=195,          # ancho máximo antes de envolver
+            justify="left",
+        )
+        self._lbl_printer.pack(fill="x", padx=10, pady=(0, 8))
 
         # Versión
         ctk.CTkLabel(sb, text="ParkingPro v1.0.0 © 2025",
-                     font=fuente(9), text_color=C["text_3"]).pack(pady=(0, 10))
+                     font=fuente(9), text_color=C["text_3"]).pack(pady=(2, 8))
 
     # ─── Navegación ───────────────────────────────────────────────────────────
 
@@ -193,7 +228,6 @@ class ParkingProApp(ctk.CTk):
     def _on_config_guardada(self):
         """Recrea la instancia de Printer si cambió la impresora configurada."""
         self.printer = Printer(self.cfg.get_nombre_impresora())
-        # Propagar al panel activo si lo soporta
         if hasattr(self._panel_activo, "set_printer"):
             self._panel_activo.set_printer(self.printer)
 
@@ -213,16 +247,72 @@ class ParkingProApp(ctk.CTk):
         self.after(1_000, self._loop_reloj)
 
     def _loop_printer_status(self):
+        """
+        Comprueba el estado real de la impresora cada 5 segundos.
+        La consulta WMIC corre en un hilo daemon para no bloquear la UI.
+        """
         if not self.winfo_exists():
             return
+
+        def _check():
+            try:
+                estado = self.printer.get_estado_detallado()
+                if self.winfo_exists():
+                    self.after(0, lambda e=estado: self._apply_printer_status(e))
+            except Exception:
+                pass
+
+        threading.Thread(target=_check, daemon=True).start()
+        # Siguiente comprobación en 5 segundos
+        self.after(5_000, self._loop_printer_status)
+
+    def _apply_printer_status(self, estado: dict):
+        """Actualiza el badge del sidebar con el estado recibido."""
+        if not self.winfo_exists():
+            return
+
+        nivel = estado.get("nivel", "offline")
+        msg   = estado.get("mensaje", "Sin información")
+
+        if nivel == "ok":
+            card_bg    = "#0a1f12"   # verde oscuro
+            icon_bg    = "#0d3321"
+            icon_color = C["green"]
+            txt_color  = C["green"]
+        elif nivel == "warning":
+            card_bg    = "#1e1500"   # amarillo oscuro
+            icon_bg    = "#3d2e05"
+            icon_color = C["yellow"]
+            txt_color  = C["yellow"]
+        elif nivel == "error":
+            card_bg    = "#1f0707"   # rojo oscuro
+            icon_bg    = "#3d0a0a"
+            icon_color = C["red"]
+            txt_color  = C["red"]
+            self._notificar_error_impresora(msg)
+        else:   # offline / no detectada
+            card_bg    = "#1f0707"   # rojo oscuro (no bg_dark)
+            icon_bg    = "#3d0a0a"
+            icon_color = C["red"]
+            txt_color  = C["red"]
+
         try:
-            if self.printer.esta_disponible():
-                self._lbl_printer.configure(text="✓ Conectada", text_color=C["green"])
-            else:
-                self._lbl_printer.configure(text="✗ No detectada", text_color=C["red"])
+            self._frame_imp.configure(fg_color=card_bg)
+            self._badge_printer_icon.configure(
+                fg_color=icon_bg,
+                text_color=icon_color,
+            )
+            self._lbl_printer.configure(text=msg, text_color=txt_color)
         except Exception:
             pass
-        self.after(10_000, self._loop_printer_status)
+
+    def _notificar_error_impresora(self, mensaje: str):
+        """
+        Rastrea el último error para evitar notificaciones duplicadas.
+        Solo registra; el badge en sidebar es la notificación visual.
+        """
+        if mensaje != self._ultimo_error_imp:
+            self._ultimo_error_imp = mensaje
 
     # ─── Setup inicial ────────────────────────────────────────────────────────
 

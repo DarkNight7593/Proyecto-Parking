@@ -61,9 +61,6 @@ class PrinterInstaller:
             return []
         try:
             flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
-            # FIX: nivel 2 (PRINTER_INFO_2) → "pPrinterName" existe.
-            # Nivel 1 (PRINTER_INFO_1) usa "pName", no "pPrinterName" →
-            # KeyError silenciado por el except → función siempre retornaba [].
             return [p["pPrinterName"] for p in win32print.EnumPrinters(flags, None, 2)]
         except Exception:
             return []
@@ -80,24 +77,24 @@ class PrinterInstaller:
         if not WINDOWS or win32print is None:
             return []
         try:
-            flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+            flags    = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
             printers = win32print.EnumPrinters(flags, None, 2)
         except Exception:
             return []
 
         result = []
         for p in printers:
-            nombre = p.get("pPrinterName", "")
-            driver = p.get("pDriverName", "")
-            puerto = p.get("pPortName", "?")
+            nombre   = p.get("pPrinterName", "")
+            driver   = p.get("pDriverName", "")
+            puerto   = p.get("pPortName", "?")
             driver_l = driver.lower()
             nombre_l = nombre.lower()
             es_compatible = any(g in driver_l for g in GENERIC_DRIVERS)
             es_ticketera  = es_compatible or any(k in nombre_l for k in _KW_TICKET)
             result.append({
-                "nombre":               nombre,
-                "driver":               driver,
-                "puerto":               puerto,
+                "nombre":                nombre,
+                "driver":                driver,
+                "puerto":                puerto,
                 "es_compatible_termica": es_compatible,
                 "es_ticketera":          es_ticketera,
             })
@@ -116,7 +113,7 @@ class PrinterInstaller:
         if not WINDOWS:
             return []
 
-        nombres_ya = {d.lower() for d in self.listar_nombres_instalados()}
+        nombres_ya  = {d.lower() for d in self.listar_nombres_instalados()}
         encontrados: List[Dict] = []
 
         try:
@@ -127,8 +124,8 @@ class PrinterInstaller:
                 "Select-Object FriendlyName, InstanceId, Class | "
                 "ConvertTo-Csv -NoTypeInformation",
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True,
-                                 errors="ignore", timeout=20)
+            res    = subprocess.run(cmd, capture_output=True, text=True,
+                                    errors="ignore", timeout=20)
             reader = csv.reader(io.StringIO(res.stdout))
             next(reader, None)  # saltar cabecera
 
@@ -144,8 +141,10 @@ class PrinterInstaller:
                 if any(b in nombre.lower() for b in _KW_BASURA):
                     continue
 
-                es_imp = ("USBPRINT" in dev_id or "PRINTER" in clase or
-                          any(k in nombre.lower() for k in ["star", "bsc", "pos", "thermal", "receipt"]))
+                es_imp = (
+                    "USBPRINT" in dev_id or "PRINTER" in clase or
+                    any(k in nombre.lower() for k in ["star", "bsc", "pos", "thermal", "receipt"])
+                )
 
                 if es_imp and nombre.lower() not in nombres_ya:
                     encontrados.append({
@@ -188,7 +187,7 @@ class PrinterInstaller:
                     dev = line.split("=", 1)[1].strip().upper()
                     if "USB" in dev:
                         try:
-                            idx = int(dev.split("\\")[-1]) + 1
+                            idx    = int(dev.split("\\")[-1]) + 1
                             puerto = f"USB{idx:03d}"
                             _log(f"➔ Puerto detectado: {puerto}")
                             return puerto
@@ -268,16 +267,7 @@ class PrinterInstaller:
         """
         Instala driver Generic/Text Only para el hardware indicado
         solicitando permisos de Administrador via UAC.
-
         Bloquea hasta que la instalación termine o venza el timeout (120 s).
-
-        Correcciones respecto a la versión anterior:
-        - FIX 1: Eliminado CREATE_NO_WINDOW: ese flag suprimía el diálogo UAC.
-        - FIX 2: Añadido -Wait a Start-Process: el proceso externo ahora espera
-                 a que el proceso elevado termine antes de retornar, evitando
-                 que el polling comience antes de que la instalación arranque.
-        - FIX 3: Timeout aumentado a 120 s: Add-Printer puede tardar más de
-                 21 s en sistemas lentos o con drivers nuevos.
         """
         if not WINDOWS:
             return False
@@ -302,25 +292,18 @@ class PrinterInstaller:
             _log("Solicitando permisos de Administrador (Windows UAC)...")
             _log("Acepta la ventana UAC que aparecerá en pantalla...")
 
-            # FIX 1: Sin creationflags=CREATE_NO_WINDOW → UAC puede mostrarse.
-            # FIX 2: -Wait en Start-Process → subprocess.run bloquea hasta que
-            #        el proceso elevado termine (en lugar de retornar al instante).
-            # Usamos array PS para evitar problemas de escape con rutas con espacios.
-            ps1_safe = ps1.replace("'", "''")  # escapar comilla simple en la ruta
+            ps1_safe   = ps1.replace("'", "''")
             launch_cmd = (
                 f"$a = @('-NoProfile','-ExecutionPolicy','Bypass','-File','{ps1_safe}');"
                 f"Start-Process powershell -ArgumentList $a -Verb RunAs -Wait"
             )
-            # FIX 3: timeout=120 s → tiempo suficiente para UAC + Add-Printer.
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command", launch_cmd],
                 timeout=120,
             )
 
-            # Verificar con reintentos: Windows puede tardar un momento
-            # en propagar la impresora al registro tras Add-Printer.
             inst_temp = PrinterInstaller(nombre_modelo)
-            for intento in range(6):          # hasta ~3 s de espera extra
+            for intento in range(6):
                 if nombre_modelo in inst_temp.listar_nombres_instalados():
                     _log(f"✅ '{nombre_modelo}' instalada correctamente.")
                     return True
@@ -332,6 +315,88 @@ class PrinterInstaller:
 
         except subprocess.TimeoutExpired:
             _log("❌ Tiempo agotado (120 s). Verifica que aceptaste el UAC.")
+            return False
+        except Exception as e:
+            _log(f"Error: {e}")
+            return False
+
+        finally:
+            def _borrar():
+                time.sleep(5)
+                try:
+                    os.remove(ps1)
+                except Exception:
+                    pass
+            threading.Thread(target=_borrar, daemon=True).start()
+
+    def cambiar_driver_generico(self, nombre_impresora: str,
+                                 log: Callable = None) -> bool:
+        """
+        Cambia el driver de una impresora ya instalada a Generic / Text Only.
+        Útil para ticketeras Epson/Star/etc. que tienen su propio driver y no
+        responden correctamente a comandos ESC/POS directos.
+
+        Usa UAC (elevación de privilegios) para ejecutar Set-Printer con admin.
+        Retorna True si el cambio se verificó correctamente.
+        """
+        if not WINDOWS:
+            return False
+
+        def _log(m):
+            if log:
+                log(m)
+
+        _log(f"Preparando cambio de driver para '{nombre_impresora}'...")
+        _log(f"Driver nuevo: {DRIVER_NOMBRE}")
+
+        fd, ps1 = tempfile.mkstemp(suffix=".ps1")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                # Primero aseguramos que el driver Generic esté disponible
+                f.write(
+                    f'Add-PrinterDriver -Name "{DRIVER_NOMBRE}" '
+                    f'-ErrorAction SilentlyContinue\n'
+                )
+                # Luego cambiamos el driver de la impresora existente
+                f.write(
+                    f'Set-Printer -Name "{nombre_impresora}" '
+                    f'-DriverName "{DRIVER_NOMBRE}" '
+                    f'-ErrorAction Stop\n'
+                )
+
+            _log("Solicitando permisos de Administrador (UAC)...")
+            _log("Acepta la ventana UAC que aparecerá en pantalla...")
+
+            ps1_safe   = ps1.replace("'", "''")
+            launch_cmd = (
+                f"$a = @('-NoProfile','-ExecutionPolicy','Bypass','-File','{ps1_safe}');"
+                f"Start-Process powershell -ArgumentList $a -Verb RunAs -Wait"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", launch_cmd],
+                timeout=120,
+            )
+
+            # Verificar: la impresora debe tener ahora un driver Generic
+            time.sleep(1)  # breve pausa para que Windows propague el cambio
+            inst_temp = PrinterInstaller(nombre_impresora)
+            for intento in range(6):
+                detalles = inst_temp.listar_impresoras_detalle()
+                for d in detalles:
+                    if d["nombre"] == nombre_impresora:
+                        if any(g in d["driver"].lower() for g in GENERIC_DRIVERS):
+                            _log(f"✅ Driver cambiado correctamente para '{nombre_impresora}'.")
+                            return True
+                        else:
+                            _log(f"⚠ Driver actual: {d['driver']}")
+                if intento < 5:
+                    time.sleep(0.5)
+
+            _log("❌ No se pudo verificar el cambio. ¿Rechazaste el UAC?")
+            return False
+
+        except subprocess.TimeoutExpired:
+            _log("❌ Tiempo agotado (120 s).")
             return False
         except Exception as e:
             _log(f"Error: {e}")
