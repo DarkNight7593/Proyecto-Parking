@@ -1,0 +1,12 @@
+# Caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Bases de datos locales
+parkingpro.db
+*.db
+*.sqlite3
+
+# Archivos de configuración local (¡importante para no subir contraseñas!)
+config.ini
