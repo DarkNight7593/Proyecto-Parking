@@ -23,7 +23,6 @@ class ConfigManager:
             "papel_mm":  "80",
         },
         "sistema": {
-            "primera_vez":      "true",
             "version":          "1.0.0",
             "db_path":          "parkingpro.db",
             "moneda":           "S/",
@@ -59,6 +58,7 @@ class ConfigManager:
             self._crear_default()
         else:
             self.config.read(self.config_path, encoding="utf-8")
+            # Asegura que todas las secciones y claves del default existan
             for seccion, valores in self.DEFAULT_CONFIG.items():
                 if not self.config.has_section(seccion):
                     self.config.add_section(seccion)
@@ -75,6 +75,8 @@ class ConfigManager:
     def _guardar(self):
         with open(self.config_path, "w", encoding="utf-8") as f:
             self.config.write(f)
+
+    # ─── Acceso genérico ──────────────────────────────────────────────────────
 
     def get(self, seccion: str, clave: str, fallback=None) -> str:
         return self.config.get(seccion, clave, fallback=fallback)
@@ -100,11 +102,7 @@ class ConfigManager:
         except (ValueError, TypeError):
             return fallback
 
-    def es_primera_vez(self) -> bool:
-        return self.getbool("sistema", "primera_vez", fallback=True)
-
-    def marcar_configurado(self):
-        self.set("sistema", "primera_vez", "false")
+    # ─── Acceso tipado ────────────────────────────────────────────────────────
 
     def get_nombre_negocio(self) -> str:
         return self.get("negocio", "nombre", fallback="Mi Estacionamiento")

@@ -1,11 +1,16 @@
 """
 ParkingPro - Panel de Configuración
 Tabs: Negocio | Tarifas | Impresora
+
+El estado de la impresora lo provee main.py (que ya corre su loop cada 5 s).
+Este panel no hace su propia consulta WMIC; en cambio:
+  • Recibe 'get_estado_imp' (callable) para leer el último estado conocido al abrirse.
+  • Recibe el estado actualizado vía actualizar_estado_imp() cada vez que main lo llama.
 """
 import threading
 import customtkinter as ctk
 from tkinter import messagebox
-from typing import Dict, List, Optional
+from typing import Dict, List, Callable, Optional
 
 from ui.theme import C, fuente, TIPOS_VEHICULO
 from installer import PrinterInstaller
@@ -19,16 +24,37 @@ class PanelConfiguracion(ctk.CTkFrame):
       • Impresora — selección de ticketera desde lista instalada
     """
 
-    def __init__(self, parent, config, db, printer, on_guardado=None, **kwargs):
+    def __init__(
+        self,
+        parent,
+        config,
+        db,
+        printer,
+        on_guardado: Callable = None,
+        get_estado_imp: Callable = None,   # () → dict con 'nivel' y 'mensaje'
+        **kwargs,
+    ):
         super().__init__(parent, fg_color=C["bg_dark"], corner_radius=0, **kwargs)
-        self.config      = config
-        self.db          = db
-        self.printer     = printer
-        self.on_guardado = on_guardado
+        self.config       = config
+        self.db           = db
+        self.printer      = printer
+        self.on_guardado  = on_guardado
+        # Getter que devuelve el último estado calculado por main (sin llamar a WMIC)
+        self._get_estado_imp: Optional[Callable] = get_estado_imp
         self._build_ui()
 
     def set_printer(self, printer):
         self.printer = printer
+
+    # ─── API pública: main llama aquí cuando cambia el estado ────────────────
+
+    def actualizar_estado_imp(self, estado: dict):
+        """
+        Invocado por main._apply_printer_status cada vez que cambia el estado.
+        Actualiza el badge de la pestaña Impresora si el widget existe.
+        """
+        if self.winfo_exists():
+            self._actualizar_estado_badge(estado)
 
     # ─── Layout ───────────────────────────────────────────────────────────────
 
@@ -81,9 +107,6 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._seccion(scroll, "Sistema")
         self._entry_moneda = self._campo_entrada(
             scroll, "Símbolo de moneda (ej: S/, $, €)", self.config.get_moneda())
-        self._entry_tl = self._campo_entrada(
-            scroll, "Tiempo libre / tolerancia (minutos)",
-            str(self.config.get_tiempo_libre()))
 
         ctk.CTkButton(
             scroll, text="💾  Guardar Datos del Negocio",
@@ -104,28 +127,7 @@ class PanelConfiguracion(ctk.CTkFrame):
         if moneda:
             self.config.set("sistema", "moneda", moneda)
 
-        error_tl = False
-        try:
-            val_tl = max(0, int(self._entry_tl.get().strip()))
-            self.config.set("sistema", "tiempo_libre_min", str(val_tl))
-            self._entry_tl.configure(border_color=C["border"])
-            if hasattr(self, "_entry_tl_tarifas"):
-                try:
-                    self._entry_tl_tarifas.delete(0, "end")
-                    self._entry_tl_tarifas.insert(0, str(val_tl))
-                    self._entry_tl_tarifas.configure(border_color=C["border"])
-                except Exception:
-                    pass
-        except ValueError:
-            self._entry_tl.configure(border_color=C["red"])
-            error_tl = True
-
-        if error_tl:
-            messagebox.showwarning(
-                "Advertencia",
-                "El tiempo libre ingresado no es válido.\nLos demás datos se guardaron.")
-        else:
-            messagebox.showinfo("✅ Guardado", "Datos del negocio guardados correctamente.")
+        messagebox.showinfo("✅ Guardado", "Datos del negocio guardados correctamente.")
 
         if self.on_guardado:
             self.on_guardado()
@@ -217,13 +219,6 @@ class PanelConfiguracion(ctk.CTkFrame):
             val_tl = max(0, int(self._entry_tl_tarifas.get().strip()))
             self.config.set("sistema", "tiempo_libre_min", str(val_tl))
             self._entry_tl_tarifas.configure(border_color=C["border"])
-            if hasattr(self, "_entry_tl"):
-                try:
-                    self._entry_tl.delete(0, "end")
-                    self._entry_tl.insert(0, str(val_tl))
-                    self._entry_tl.configure(border_color=C["border"])
-                except Exception:
-                    pass
         except ValueError:
             errores.append("Tiempo libre")
             self._entry_tl_tarifas.configure(border_color=C["red"])
@@ -243,8 +238,7 @@ class PanelConfiguracion(ctk.CTkFrame):
     def _build_tab_impresora(self, parent):
         self._imp_seleccionada: str = self.config.get_nombre_impresora()
 
-        # ── Botones de acción fijos en la parte inferior ──────────────────
-        # Se empaquetan ANTES que el scroll para que siempre estén visibles
+        # Botones de acción fijos en la parte inferior (se empaquetan antes que el scroll)
         btns_frame = ctk.CTkFrame(parent, fg_color=C["bg_dark"], corner_radius=0)
         btns_frame.pack(side="bottom", fill="x", padx=4, pady=(4, 6))
 
@@ -266,7 +260,7 @@ class PanelConfiguracion(ctk.CTkFrame):
             command=self._test_impresora,
         ).pack(side="left", padx=5)
 
-        # ── Contenido scrollable ──────────────────────────────────────────
+        # Contenido scrollable
         scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent",
                                          scrollbar_fg_color=C["bg_light"])
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
@@ -274,12 +268,12 @@ class PanelConfiguracion(ctk.CTkFrame):
         # ── Ticketera activa ──────────────────────────────────────────────
         self._seccion(scroll, "Ticketera Activa")
 
-        self._card_activa = ctk.CTkFrame(scroll, fg_color=C["bg_dark"], corner_radius=12,
+        self._card_activa = ctk.CTkFrame(scroll, fg_color=C["bg_dark"], corner_radius=10,
                                           border_color=C["green"], border_width=2)
         self._card_activa.pack(fill="x", padx=4, pady=(0, 4))
 
         fila_act = ctk.CTkFrame(self._card_activa, fg_color="transparent")
-        fila_act.pack(fill="x", padx=16, pady=12)
+        fila_act.pack(fill="x", padx=12, pady=(8, 0))
 
         self._lbl_imp_activa = ctk.CTkLabel(
             fila_act,
@@ -288,20 +282,22 @@ class PanelConfiguracion(ctk.CTkFrame):
         )
         self._lbl_imp_activa.pack(side="left", fill="x", expand=True)
 
-        ctk.CTkButton(
-            fila_act, text="🧪 Prueba",
-            fg_color=C["bg_medium"], hover_color=C["bg_light"],
-            text_color=C["text_2"], font=fuente(11), height=34, width=100,
-            command=self._test_impresora,
-        ).pack(side="right")
+        # Botón de reparación: solo visible cuando hay error/offline
+        self._btn_reparar = ctk.CTkButton(
+            fila_act, text="🔧 Reparar USB",
+            fg_color="#ea580c", hover_color="#c2410c",
+            text_color="white", font=fuente(11, bold=True), height=26, width=100,
+            command=self._reparar_impresora,
+        )
+        # Se empaqueta dinámicamente solo cuando hay error (ver _actualizar_estado_badge)
 
         self._lbl_estado_imp = ctk.CTkLabel(
-            self._card_activa, text="Verificando estado real...",
+            self._card_activa, text="Verificando estado...",
             font=fuente(11), text_color=C["text_3"],
         )
-        self._lbl_estado_imp.pack(anchor="w", padx=16, pady=(0, 10))
+        self._lbl_estado_imp.pack(anchor="w", padx=12, pady=(2, 8))
 
-        # ── Lista de impresoras instaladas (scroll propio) ─────────────────
+        # ── Lista de impresoras instaladas ────────────────────────────────
         self._seccion(scroll, "Impresoras Instaladas en Windows")
 
         ctk.CTkLabel(
@@ -312,7 +308,6 @@ class PanelConfiguracion(ctk.CTkFrame):
             font=fuente(11), text_color=C["text_3"], justify="left",
         ).pack(anchor="w", padx=10, pady=(0, 6))
 
-        # Frame con borde que contiene el scroll de la lista
         lista_border = ctk.CTkFrame(scroll, fg_color=C["bg_dark"],
                                      corner_radius=12, border_color=C["border"],
                                      border_width=1)
@@ -323,11 +318,10 @@ class PanelConfiguracion(ctk.CTkFrame):
             height=200,
         )
         self._frame_lista.pack(fill="x", padx=2, pady=2)
-
         ctk.CTkLabel(self._frame_lista, text="🔄  Cargando impresoras...",
                      font=fuente(12), text_color=C["text_3"]).pack(pady=20)
 
-        # ── Hardware sin driver (scroll propio) ───────────────────────────
+        # ── Hardware sin driver ───────────────────────────────────────────
         self._seccion(scroll, "Hardware USB Detectado sin Driver")
 
         ctk.CTkLabel(
@@ -346,7 +340,6 @@ class PanelConfiguracion(ctk.CTkFrame):
             height=110,
         )
         self._frame_hw.pack(fill="x", padx=2, pady=2)
-
         ctk.CTkLabel(self._frame_hw, text="Presiona 🔄 Actualizar para detectar hardware",
                      font=fuente(11), text_color=C["text_3"]).pack(pady=14)
 
@@ -358,45 +351,67 @@ class PanelConfiguracion(ctk.CTkFrame):
             height=60, font=ctk.CTkFont("Courier", 10),
         )
         self._txt_log.pack(fill="x", padx=4, pady=(0, 4))
-
         self._log("Sistema listo. Presiona 🔄 Actualizar para ver las impresoras.")
 
-        # Auto-escanear y verificar estado real
+        # Auto-escanear al abrir y mostrar el estado actual conocido por main
         self.after(300, self._escanear)
-        self.after(400, self._actualizar_estado_badge)
-        # Loop de verificación periódica del estado real de la impresora
-        self.after(15_000, self._loop_estado_imp)
+        self.after(100, self._mostrar_estado_inicial)
 
-    # ─── Verificación de estado en tiempo real ────────────────────────────────
+    def _mostrar_estado_inicial(self):
+        """Lee el estado ya calculado por main y lo aplica al badge."""
+        estado = (
+            self._get_estado_imp()
+            if self._get_estado_imp
+            else {"nivel": "offline", "mensaje": "Verificando..."}
+        )
+        self._actualizar_estado_badge(estado)
 
-    def _actualizar_estado_badge(self):
+    # ─── Badge de estado (sin consulta WMIC propia) ───────────────────────────
+
+    def _actualizar_estado_badge(self, estado: dict = None):
         """
-        Actualiza el badge de la ticketera activa con estado REAL de Windows.
-        No usa el config guardado — consulta directamente al sistema.
+        Actualiza el badge de la ticketera activa con el estado dado.
+        Si no se pasa 'estado', usa el último conocido por main (via _get_estado_imp).
+        No hace ninguna consulta WMIC — ese trabajo lo hace main.
         """
+        if not self.winfo_exists():
+            return
+
+        if estado is None:
+            estado = (
+                self._get_estado_imp()
+                if self._get_estado_imp
+                else {"nivel": "offline", "mensaje": "Verificando..."}
+            )
+
+        nivel = estado.get("nivel", "offline")
+        msg   = estado.get("mensaje", "Sin información")
+
+        if nivel == "ok":
+            color_borde  = C["green"]
+            color_txt    = C["green"]
+            color_titulo = C["green"]
+            # Ocultar botón de reparar
+            self._btn_reparar.pack_forget()
+        elif nivel == "warning":
+            color_borde  = C["yellow"]
+            color_txt    = C["yellow"]
+            color_titulo = C["text_1"]
+            self._btn_reparar.pack_forget()
+        elif nivel == "error":
+            color_borde  = C["red"]
+            color_txt    = C["red"]
+            color_titulo = C["text_1"]
+            self._log(f"⚠ Error detectado: {msg}")
+            # Mostrar botón de reparar
+            self._btn_reparar.pack(side="left")
+        else:  # offline
+            color_borde  = C["red"]
+            color_txt    = C["red"]
+            color_titulo = C["text_3"]
+            self._btn_reparar.pack(side="left")
+
         try:
-            estado = self.printer.get_estado_detallado()
-            nivel  = estado["nivel"]
-            msg    = estado["mensaje"]
-
-            if nivel == "ok":
-                color_borde = C["green"]
-                color_txt   = C["green"]
-                color_titulo = C["green"]
-            elif nivel == "warning":
-                color_borde = C["yellow"]
-                color_txt   = C["yellow"]
-                color_titulo = C["text_1"]
-            elif nivel == "error":
-                color_borde = C["red"]
-                color_txt   = C["red"]
-                color_titulo = C["text_1"]
-                self._log(f"⚠ Error detectado: {msg}")
-            else:  # offline
-                color_borde = C["red"]
-                color_txt   = C["red"]
-                color_titulo = C["text_3"]
-
             self._lbl_estado_imp.configure(text=msg, text_color=color_txt)
             self._card_activa.configure(border_color=color_borde)
             self._lbl_imp_activa.configure(
@@ -406,25 +421,18 @@ class PanelConfiguracion(ctk.CTkFrame):
         except Exception:
             pass
 
-    def _loop_estado_imp(self):
-        """Loop periódico de verificación del estado de la impresora (cada 15 s)."""
-        if not self.winfo_exists():
-            return
-        self._actualizar_estado_badge()
-        self.after(15_000, self._loop_estado_imp)
-
     # ─── Selección de impresora ───────────────────────────────────────────────
 
     def _seleccionar_impresora(self, nombre: str):
         """Guarda la impresora seleccionada y actualiza la UI."""
         self._imp_seleccionada = nombre
         self.config.set("impresora", "nombre", nombre)
-        # Actualizar la instancia de printer en el panel
         from printer import Printer
         self.printer = Printer(nombre)
         self._log(f"✅ Impresora seleccionada: {nombre}")
         self._lbl_imp_activa.configure(text=f"🖨️  {nombre}")
-        self._actualizar_estado_badge()
+        # Mostrar "Verificando..." hasta que main empuje el estado real (~5 s)
+        self._actualizar_estado_badge({"nivel": "warning", "mensaje": "Verificando estado..."})
         if self.on_guardado:
             self.on_guardado()
         self._escanear()
@@ -432,7 +440,7 @@ class PanelConfiguracion(ctk.CTkFrame):
     # ─── Escaneo en background ────────────────────────────────────────────────
 
     def _escanear(self):
-        """Lanza el escaneo de impresoras en un hilo daemon."""
+        """Lanza el escaneo de impresoras instaladas en un hilo daemon."""
         for w in self._frame_lista.winfo_children():
             w.destroy()
         ctk.CTkLabel(self._frame_lista, text="🔄  Escaneando...",
@@ -456,7 +464,7 @@ class PanelConfiguracion(ctk.CTkFrame):
         if not self.winfo_exists():
             return
 
-        # ── Lista de impresoras ───────────────────────────────────────────
+        # Lista de impresoras
         for w in self._frame_lista.winfo_children():
             w.destroy()
 
@@ -474,7 +482,7 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._log(f"Encontradas: {len(impresoras)} impresoras, "
                   f"{len(hardware)} dispositivo(s) sin driver.")
 
-        # ── Hardware sin driver ───────────────────────────────────────────
+        # Hardware sin driver
         for w in self._frame_hw.winfo_children():
             w.destroy()
 
@@ -486,6 +494,7 @@ class PanelConfiguracion(ctk.CTkFrame):
             for dev in hardware:
                 self._render_hw_card(dev)
 
+        # Refrescar badge con el estado actual conocido (sin nueva llamada WMIC)
         self._actualizar_estado_badge()
 
     def _render_imp_card(self, imp: Dict):
@@ -505,7 +514,6 @@ class PanelConfiguracion(ctk.CTkFrame):
                              border_color=border_color, border_width=border_w)
         card.pack(fill="x", padx=8, pady=4)
 
-        # Izquierda: info
         left = ctk.CTkFrame(card, fg_color="transparent")
         left.pack(side="left", fill="x", expand=True, padx=14, pady=10)
 
@@ -524,7 +532,6 @@ class PanelConfiguracion(ctk.CTkFrame):
                           corner_radius=8, width=100, height=20,
                           ).pack(side="left", padx=(10, 0))
         elif es_ticket:
-            # Ticketera con driver no-Generic: indicar que puede no funcionar bien
             ctk.CTkLabel(top_row, text="⚠ Driver propio",
                           font=fuente(9, bold=True),
                           fg_color=C["yellow_h"], text_color="white",
@@ -536,7 +543,6 @@ class PanelConfiguracion(ctk.CTkFrame):
                      font=fuente(10), text_color=C["text_3"],
                      anchor="w").pack(fill="x", pady=(2, 0))
 
-        # Derecha: botones
         right = ctk.CTkFrame(card, fg_color="transparent")
         right.pack(side="right", padx=14, pady=10)
 
@@ -544,7 +550,6 @@ class PanelConfiguracion(ctk.CTkFrame):
             ctk.CTkLabel(right, text="✓ Seleccionada",
                          font=fuente(11, bold=True), text_color=C["green"]).pack()
         elif es_compat:
-            # Generic/Text Only → puede seleccionarse directamente
             ctk.CTkButton(
                 right, text="Seleccionar",
                 fg_color=C["blue"], hover_color=C["blue_h"],
@@ -553,7 +558,6 @@ class PanelConfiguracion(ctk.CTkFrame):
                 command=lambda n=nombre: self._seleccionar_impresora(n),
             ).pack()
         else:
-            # Driver no compatible — ofrecer cambio a Generic en lugar de Seleccionar
             ctk.CTkButton(
                 right, text="🔧 Cambiar Driver\n(Admin)",
                 fg_color="#7c2d12", hover_color="#9a3412",
@@ -592,8 +596,8 @@ class PanelConfiguracion(ctk.CTkFrame):
 
     def _cambiar_driver_generico(self, nombre_impresora: str):
         """
-        Cambia el driver de una impresora ticketera a Generic/Text Only.
-        Necesario para que ESC/POS funcione con impresoras que tienen driver propio.
+        Cambia el driver a Generic/Text Only via UAC.
+        Necesario para que ESC/POS funcione en ticketeras con driver propio.
         """
         if not messagebox.askyesno(
             "Cambiar Driver a Generic/Text Only",
@@ -653,8 +657,15 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._log(f"Iniciando instalación como Admin para: {nombre_modelo}...")
 
         def _run():
-            inst  = PrinterInstaller(nombre_modelo)
-            exito = inst.instalar_como_admin(nombre_modelo, log=lambda m: self.after(0, self._log, m))
+            inst = PrinterInstaller(nombre_modelo)
+            puerto_detectado = inst.detectar_puerto(
+                log=lambda m: self.after(0, self._log, m)
+            )
+            exito = inst.instalar_como_admin(
+                nombre_modelo,
+                puerto=puerto_detectado,
+                log=lambda m: self.after(0, self._log, m)
+            )
 
             def _ui():
                 if not self.winfo_exists():
@@ -699,6 +710,39 @@ class PanelConfiguracion(ctk.CTkFrame):
             messagebox.showinfo("Prueba de Impresión", msg)
         else:
             messagebox.showwarning("Prueba de Impresión", msg)
+
+    # ─── Reparación automática ────────────────────────────────────────────────
+
+    def _reparar_impresora(self):
+        if not messagebox.askyesno(
+            "Reparar Conexión USB",
+            "¿Deseas buscar la ticketera en los puertos USB y reconectarla automáticamente?\n\n"
+            "Windows podría pedir permisos de Administrador."
+        ):
+            return
+
+        self._log("Iniciando reparación automática de conexión USB...")
+
+        def _run():
+            inst  = PrinterInstaller(self._imp_seleccionada)
+            exito = inst.reparar_conexion_admin(log=lambda m: self.after(0, self._log, m))
+
+            def _ui():
+                if not self.winfo_exists():
+                    return
+                if exito:
+                    self._log("✅ Intento de reparación finalizado.")
+                    messagebox.showinfo(
+                        "Reparación",
+                        "Se actualizó el puerto de la impresora.\n"
+                        "Presiona 🧪 Prueba para verificar que todo funciona."
+                    )
+                    self._escanear()
+                else:
+                    self._log("❌ Falló la reparación.")
+            self.after(0, _ui)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
 

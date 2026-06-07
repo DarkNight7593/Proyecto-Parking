@@ -160,109 +160,57 @@ class PrinterInstaller:
     # ─── Detección de puerto ──────────────────────────────────────────────────
 
     def detectar_puerto(self, log: Callable = None) -> str:
-        """Detecta el puerto USB más probable para una nueva ticketera."""
-        if not WINDOWS:
+            """
+            Detecta el puerto USB exacto del hardware conectado actualmente
+            leyendo el Registro de Windows y los dispositivos Plug & Play activos.
+            """
+            if not WINDOWS:
+                return "USB001"
+
+            def _log(m):
+                if log:
+                    log(m)
+
+            _log("🔍 Buscando puerto físico en el Registro de Windows...")
+
+            try:
+                # Ampliamos la búsqueda: Cualquier dispositivo PnP 'Presente' (conectado ahora mismo)
+                # que tenga 'USB' en su ID (esto cubre tanto 'USB\' como 'USBPRINT\')
+                ps_script = (
+                    "$devs = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | "
+                    "Where-Object { $_.InstanceId -match 'USB' }; "
+                    "foreach ($d in $devs) { "
+                    "  $path = 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\' + $d.InstanceId + '\\Device Parameters'; "
+                    "  $p = (Get-ItemProperty -Path $path -Name 'PortName' -ErrorAction SilentlyContinue).PortName; "
+                    "  if ($p -match '^USB\\d+') { Write-Output $p } "
+                    "}"
+                )
+                
+                cmd = ["powershell", "-NoProfile", "-Command", ps_script]
+                res = subprocess.run(cmd, capture_output=True, text=True, errors="ignore", timeout=15)
+                
+                # Limpiamos los resultados
+                puertos_activos = [line.strip() for line in res.stdout.splitlines() if line.strip().startswith("USB")]
+                
+                if puertos_activos:
+                    # Si detecta varios puertos activos, tomamos el más alto/reciente
+                    puertos_activos.sort()
+                    puerto_real = puertos_activos[-1] 
+                    
+                    _log(f"➔ ¡Ticketera encontrada físicamente en el puerto: {puerto_real}!")
+                    return puerto_real
+                else:
+                    _log("⚠ No se detectó ninguna ticketera conectada y encendida.")
+                    
+            except Exception as e:
+                _log(f"⚠ Error en detección avanzada: {e}")
+
+            _log("➔ Usando puerto por defecto: USB001")
             return "USB001"
-
-        def _log(m):
-            if log:
-                log(m)
-
-        _log("🔍 Detectando puerto USB...")
-
-        try:
-            cmd = (
-                'wmic path win32_pnpentity '
-                'where "Service=\'usbprint\' '
-                'or Caption like \'%POS%\' '
-                'or Caption like \'%Thermal%\' '
-                'or Caption like \'%Receipt%\'"'
-                ' get Caption,DeviceID /format:list'
-            )
-            res = subprocess.run(cmd, shell=True, capture_output=True,
-                                 text=True, errors="ignore", timeout=10)
-            for line in res.stdout.splitlines():
-                line = line.strip()
-                if line.upper().startswith("DEVICEID="):
-                    dev = line.split("=", 1)[1].strip().upper()
-                    if "USB" in dev:
-                        try:
-                            idx    = int(dev.split("\\")[-1]) + 1
-                            puerto = f"USB{idx:03d}"
-                            _log(f"➔ Puerto detectado: {puerto}")
-                            return puerto
-                        except ValueError:
-                            pass
-        except Exception:
-            pass
-
-        _log("➔ Usando puerto por defecto: USB001")
-        return "USB001"
-
+  
     # ─── Instalación ──────────────────────────────────────────────────────────
 
-    def instalar(self, puerto: str = "USB001",
-                 log: Callable = None) -> Tuple[bool, str]:
-        """
-        Instala la impresora con Generic/Text Only en el puerto indicado.
-        Requiere permisos de administrador.
-        """
-        if not WINDOWS:
-            return False, "Solo disponible en Windows."
-
-        if self.impresora_ya_instalada():
-            return True, f"'{self.nombre_impresora}' ya está instalada."
-
-        def _log(m):
-            if log:
-                log(m)
-
-        # Método 1: printui.dll
-        try:
-            _log("Intentando con printui.dll...")
-            cmd = [
-                "rundll32", "printui.dll,PrintUIEntry",
-                "/if",
-                "/b", self.nombre_impresora,
-                "/f", os.path.expandvars(DRIVER_INF),
-                "/r", puerto,
-                "/m", DRIVER_NOMBRE,
-            ]
-            subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if self.impresora_ya_instalada():
-                _log("✅ Instalada con printui.dll")
-                return True, f"'{self.nombre_impresora}' instalada en {puerto}."
-        except Exception as e:
-            _log(f"printui.dll falló: {e}")
-
-        # Método 2: PowerShell
-        try:
-            _log("Intentando con PowerShell...")
-            ps = (
-                f'Add-PrinterPort -Name "{puerto}" -ErrorAction SilentlyContinue; '
-                f'Add-PrinterDriver -Name "{DRIVER_NOMBRE}" -ErrorAction SilentlyContinue; '
-                f'Add-Printer -Name "{self.nombre_impresora}" '
-                f'-DriverName "{DRIVER_NOMBRE}" -PortName "{puerto}"'
-            )
-            subprocess.run(["powershell", "-Command", ps],
-                           capture_output=True, text=True, timeout=30)
-            if self.impresora_ya_instalada():
-                _log("✅ Instalada con PowerShell")
-                return True, f"'{self.nombre_impresora}' instalada en {puerto}."
-        except Exception as e:
-            _log(f"PowerShell falló: {e}")
-
-        return False, (
-            "No se pudo instalar automáticamente.\n"
-            "Instalación manual:\n"
-            "1. Panel de Control → Dispositivos e Impresoras\n"
-            "2. Agregar impresora → No en la lista\n"
-            f"3. Puerto local → {puerto}\n"
-            "4. Driver: Generic / Text Only\n"
-            f"5. Nombre: {self.nombre_impresora}"
-        )
-
-    def instalar_como_admin(self, nombre_modelo: str,
+    def instalar_como_admin(self, nombre_modelo: str, puerto: str = "USB001",
                              log: Callable = None) -> bool:
         """
         Instala driver Generic/Text Only para el hardware indicado
@@ -281,11 +229,11 @@ class PrinterInstaller:
         fd, ps1 = tempfile.mkstemp(suffix=".ps1")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write('Add-PrinterPort -Name "USB001" -ErrorAction SilentlyContinue\n')
+                f.write(f'Add-PrinterPort -Name "{puerto}" -ErrorAction SilentlyContinue\n')
                 f.write(f'Add-PrinterDriver -Name "{DRIVER_NOMBRE}" -ErrorAction SilentlyContinue\n')
                 f.write(
                     f'Add-Printer -Name "{nombre_modelo}" '
-                    f'-DriverName "{DRIVER_NOMBRE}" -PortName "USB001" '
+                    f'-DriverName "{DRIVER_NOMBRE}" -PortName "{puerto}" '
                     f'-ErrorAction SilentlyContinue\n'
                 )
 
@@ -320,6 +268,66 @@ class PrinterInstaller:
             _log(f"Error: {e}")
             return False
 
+        finally:
+            def _borrar():
+                time.sleep(5)
+                try:
+                    os.remove(ps1)
+                except Exception:
+                    pass
+            threading.Thread(target=_borrar, daemon=True).start()
+
+    def reparar_conexion_admin(self, log: Callable = None) -> bool:
+        """
+        Detecta el nuevo puerto físico USB y actualiza la configuración de Windows.
+        Solicita permisos de Administrador (UAC) para asegurar el cambio.
+        """
+        if not WINDOWS:
+            return False
+
+        def _log(m):
+            if log:
+                log(m)
+
+        _log(f"Buscando nuevo puerto físico para '{self.nombre_impresora}'...")
+        
+        # 1. Usamos tu detector de alta precisión
+        nuevo_puerto = self.detectar_puerto(log=log)
+        
+        _log(f"➔ Moviendo '{self.nombre_impresora}' al puerto {nuevo_puerto}...")
+
+        fd, ps1 = tempfile.mkstemp(suffix=".ps1")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                # Comando para cambiar solo el puerto de la impresora existente
+                f.write(
+                    f'Set-Printer -Name "{self.nombre_impresora}" '
+                    f'-PortName "{nuevo_puerto}" '
+                    f'-ErrorAction Stop\n'
+                )
+
+            _log("Solicitando permisos de Administrador (UAC)...")
+
+            ps1_safe   = ps1.replace("'", "''")
+            launch_cmd = (
+                f"$a = @('-NoProfile','-ExecutionPolicy','Bypass','-File','{ps1_safe}');"
+                f"Start-Process powershell -ArgumentList $a -Verb RunAs -Wait"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", launch_cmd],
+                timeout=60,
+            )
+
+            # Pequeña pausa para que Windows asimile el cambio
+            time.sleep(1)
+            return True
+
+        except subprocess.TimeoutExpired:
+            _log("❌ Tiempo agotado. ¿Rechazaste el permiso?")
+            return False
+        except Exception as e:
+            _log(f"❌ Error al intentar reparar: {e}")
+            return False
         finally:
             def _borrar():
                 time.sleep(5)
@@ -410,32 +418,6 @@ class PrinterInstaller:
                 except Exception:
                     pass
             threading.Thread(target=_borrar, daemon=True).start()
-
-    def instalar_auto(self, log: Callable = None) -> Tuple[bool, str]:
-        """Detecta puerto automáticamente e instala la impresora."""
-        if not WINDOWS:
-            return False, "Solo disponible en Windows."
-        if self.impresora_ya_instalada():
-            if log:
-                log(f"✅ '{self.nombre_impresora}' ya está instalada.")
-            return True, "La impresora ya estaba instalada."
-
-        puerto = self.detectar_puerto(log=log) or "USB001"
-        return self.instalar(puerto, log=log)
-
-    def eliminar(self) -> Tuple[bool, str]:
-        """Elimina la impresora del sistema."""
-        if not WINDOWS:
-            return False, "Solo en Windows."
-        try:
-            subprocess.run(
-                ["rundll32", "printui.dll,PrintUIEntry",
-                 "/dl", "/n", self.nombre_impresora, "/q"],
-                timeout=15, capture_output=True,
-            )
-            return True, f"'{self.nombre_impresora}' eliminada."
-        except Exception as e:
-            return False, str(e)
 
     def imprimir_pagina_prueba(self) -> Tuple[bool, str]:
         """Envía una página de prueba a la impresora."""

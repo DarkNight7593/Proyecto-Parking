@@ -37,8 +37,7 @@ CUT_GS       = GS  + b'V\x00'
 
 ANCHO_TICKET = 42
 
-# ─── WMI PrinterStatus codes ─────────────────────────────────────────────────
-# Ref: CIM_Printer.PrinterStatus (Win32_Printer)
+# ─── WMI PrinterStatus codes (CIM_Printer.PrinterStatus) ──────────────────────
 _WMI_PRINTER_STATUS = {
     1: ("warning", "⚠ Estado desconocido"),
     2: ("warning", "⚠ Estado no disponible"),
@@ -49,8 +48,7 @@ _WMI_PRINTER_STATUS = {
     7: ("offline", "✗ Desconectada / Offline"),
 }
 
-# ─── WMI DetectedErrorState codes ────────────────────────────────────────────
-# Ref: CIM_Printer.DetectedErrorState
+# ─── WMI DetectedErrorState codes (CIM_Printer.DetectedErrorState) ────────────
 _WMI_ERROR_STATE = {
     3:  ("warning", "⚠ Papel bajo"),
     4:  ("error",   "⚠ Sin papel"),
@@ -101,20 +99,18 @@ class Printer:
     def __init__(self, nombre_impresora: str):
         self.nombre_impresora = nombre_impresora
 
-    # ─── WMI via WMIC (detección tiempo real) ────────────────────────────────
+    # ─── WMI via WMIC (detección en tiempo real) ──────────────────────────────
 
     def _get_wmi_printer_info(self) -> dict:
         """
         Consulta Win32_Printer via WMIC para obtener estado real del hardware.
         Detecta desconexión USB típicamente en 2-10 segundos.
-        Retorna dict con claves: printer_status, detected_error, work_offline.
         Retorna {} si falla o el sistema no es Windows.
         """
         if not WINDOWS_PRINT:
             return {}
         try:
-            # Sanear nombre: eliminar comillas
-            safe = self.nombre_impresora.replace('"', '').replace("'", "")
+            safe   = self.nombre_impresora.replace('"', '').replace("'", "")
             result = subprocess.run(
                 [
                     "wmic", "printer",
@@ -155,7 +151,7 @@ class Printer:
         if not WINDOWS_PRINT:
             return False
         try:
-            flags  = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+            flags   = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
             nombres = [p["pPrinterName"] for p in win32print.EnumPrinters(flags, None, 2)]
             return self.nombre_impresora in nombres
         except Exception:
@@ -195,7 +191,7 @@ class Printer:
 
         result["disponible"] = True
 
-        # 2. WMI (WMIC) — fuente más fiable para hardware real
+        # 2. WMI — fuente más fiable para hardware real
         wmi = self._get_wmi_printer_info()
         if wmi:
             work_offline   = wmi.get("work_offline", False)
@@ -211,7 +207,7 @@ class Printer:
                 })
                 return result
 
-            # DetectedErrorState=9 → offline reportado por dispositivo
+            # DetectedErrorState=9 → offline reportado por el dispositivo
             if detected_error == 9:
                 result.update({
                     "ok":      False,
@@ -267,7 +263,6 @@ class Printer:
             finally:
                 win32print.ClosePrinter(h)
 
-            # Atributo WorkOffline activo en spooler
             if attrs & _ATTR_WORK_OFFLINE:
                 result.update({
                     "ok":      False,
@@ -276,7 +271,6 @@ class Printer:
                 })
                 return result
 
-            # Status=0 → lista
             if status == 0:
                 result.update({
                     "ok":      True,
@@ -308,13 +302,6 @@ class Printer:
             })
 
         return result
-
-    def get_estado_texto(self) -> str:
-        if not WINDOWS_PRINT:
-            return "No disponible (no-Windows)"
-        if self.esta_disponible():
-            return f"✓ Conectada: {self.nombre_impresora}"
-        return f"✗ No encontrada: {self.nombre_impresora}"
 
     # ─── Envío RAW ────────────────────────────────────────────────────────────
 
@@ -359,7 +346,7 @@ class Printer:
 
     def imprimir_entrada(self, sesion: Dict, nombre_negocio: str = "PARKING",
                          moneda: str = "S/") -> bool:
-        # Verificar estado antes de encolar — no enviar si offline/error
+        # No enviar si la impresora está offline o en error
         estado = self.get_estado_detallado()
         if estado["nivel"] in ("error", "offline"):
             print(f"[Impresora] Ticket entrada omitido: {estado['mensaje']}")
@@ -406,7 +393,7 @@ class Printer:
 
     def imprimir_cobro(self, sesion: Dict, nombre_negocio: str = "PARKING",
                        tarifa_hora: float = 2.0, moneda: str = "S/") -> bool:
-        # Verificar estado antes de encolar — no enviar si offline/error
+        # No enviar si la impresora está offline o en error
         estado = self.get_estado_detallado()
         if estado["nivel"] in ("error", "offline"):
             print(f"[Impresora] Ticket cobro omitido: {estado['mensaje']}")

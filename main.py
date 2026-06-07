@@ -55,16 +55,16 @@ class ParkingProApp(ctk.CTk):
         self._panel_activo = None
         self._nav_btns: dict = {}
         self._nav_actual: str = ""
-        self._ultimo_error_imp: str = ""
+
+        # Estado actual de la impresora (actualizado cada 5 s por _loop_printer_status).
+        # Cualquier panel que necesite este dato lo lee aquí; no repite la consulta WMIC.
+        self._ultimo_estado_imp: dict = {"nivel": "offline", "mensaje": "Verificando..."}
 
         # ── UI ────────────────────────────────────────────────────────────
         self._build_layout()
         self._navegar("principal")
         self._loop_reloj()
         self._loop_printer_status()   # primera comprobación al arrancar
-
-        if self.cfg.es_primera_vez():
-            self.after(600, self._mostrar_setup)
 
     # ─── Layout ──────────────────────────────────────────────────────────────
 
@@ -114,7 +114,7 @@ class ParkingProApp(ctk.CTk):
         nav_items = [
             ("principal",     "🅿  Operación",    "Registro de vehículos"),
             ("reportes",      "📊  Reportes",      "Ingresos y estadísticas"),
-            ("configuracion", "⚙️  Configuración", "Tarifas y ajustes"),
+            ("configuracion", "⚙️  Configuración", "Sistema, Tarifas y Ticketera "),
         ]
         for key, titulo, sub in nav_items:
             btn = ctk.CTkButton(
@@ -145,14 +145,14 @@ class ParkingProApp(ctk.CTk):
         # Espaciador flexible
         ctk.CTkFrame(sb, fg_color="transparent").pack(fill="both", expand=True)
 
-        # ── Badge de impresora (rediseñado) ───────────────────────────────
+        # ── Badge de impresora ────────────────────────────────────────────
         ctk.CTkFrame(sb, fg_color=C["border"], height=1).pack(fill="x", padx=14,
                                                                 pady=(0, 6))
 
         self._frame_imp = ctk.CTkFrame(sb, fg_color=C["bg_medium"], corner_radius=10)
         self._frame_imp.pack(fill="x", padx=12, pady=(0, 6))
 
-        # Fila superior: icono de color + "Ticketera"
+        # Fila superior: icono + título
         fila_top = ctk.CTkFrame(self._frame_imp, fg_color="transparent")
         fila_top.pack(fill="x", padx=10, pady=(8, 2))
 
@@ -172,14 +172,14 @@ class ParkingProApp(ctk.CTk):
             font=fuente(11, bold=True), text_color=C["text_2"], anchor="w",
         ).pack(side="left", padx=(7, 0))
 
-        # Fila inferior: mensaje de estado (ancho completo, sin recorte)
+        # Fila inferior: mensaje de estado
         self._lbl_printer = ctk.CTkLabel(
             self._frame_imp,
             text="Verificando...",
             font=fuente(9),
             text_color=C["text_3"],
             anchor="w",
-            wraplength=195,          # ancho máximo antes de envolver
+            wraplength=195,
             justify="left",
         )
         self._lbl_printer.pack(fill="x", padx=10, pady=(0, 8))
@@ -210,14 +210,19 @@ class ParkingProApp(ctk.CTk):
         if destino == "principal":
             from ui.panel_principal import PanelPrincipal
             panel = PanelPrincipal(self._content_wrap, self.cfg, self.db, self.printer)
+
         elif destino == "reportes":
             from ui.panel_reportes import PanelReportes
             panel = PanelReportes(self._content_wrap, self.cfg, self.db, self.printer)
+
         elif destino == "configuracion":
             from ui.panel_configuracion import PanelConfiguracion
             panel = PanelConfiguracion(
                 self._content_wrap, self.cfg, self.db, self.printer,
                 on_guardado=self._on_config_guardada,
+                # Getter para que el panel lea el estado ya calculado por main,
+                # sin tener que hacer su propia consulta WMIC.
+                get_estado_imp=lambda: self._ultimo_estado_imp,
             )
         else:
             return
@@ -226,7 +231,7 @@ class ParkingProApp(ctk.CTk):
         self._panel_activo = panel
 
     def _on_config_guardada(self):
-        """Recrea la instancia de Printer si cambió la impresora configurada."""
+        """Recrea Printer si cambió la impresora configurada y notifica al panel activo."""
         self.printer = Printer(self.cfg.get_nombre_impresora())
         if hasattr(self._panel_activo, "set_printer"):
             self._panel_activo.set_printer(self.printer)
@@ -248,8 +253,8 @@ class ParkingProApp(ctk.CTk):
 
     def _loop_printer_status(self):
         """
-        Comprueba el estado real de la impresora cada 5 segundos.
-        La consulta WMIC corre en un hilo daemon para no bloquear la UI.
+        Comprueba el estado real de la impresora cada 5 segundos en hilo daemon.
+        Es la única fuente de verdad del estado; los paneles leen de aquí.
         """
         if not self.winfo_exists():
             return
@@ -263,67 +268,57 @@ class ParkingProApp(ctk.CTk):
                 pass
 
         threading.Thread(target=_check, daemon=True).start()
-        # Siguiente comprobación en 5 segundos
         self.after(5_000, self._loop_printer_status)
 
     def _apply_printer_status(self, estado: dict):
-        """Actualiza el badge del sidebar con el estado recibido."""
+        """
+        Actualiza el badge del sidebar y notifica al panel activo si es Configuración.
+        Guarda siempre el estado en self._ultimo_estado_imp para que cualquier panel
+        pueda consultarlo sin duplicar la llamada WMIC.
+        """
         if not self.winfo_exists():
             return
+
+        # Guardar estado para que los paneles lo lean
+        self._ultimo_estado_imp = estado
 
         nivel = estado.get("nivel", "offline")
         msg   = estado.get("mensaje", "Sin información")
 
         if nivel == "ok":
-            card_bg    = "#0a1f12"   # verde oscuro
+            card_bg    = "#0a1f12"
             icon_bg    = "#0d3321"
             icon_color = C["green"]
             txt_color  = C["green"]
         elif nivel == "warning":
-            card_bg    = "#1e1500"   # amarillo oscuro
+            card_bg    = "#1e1500"
             icon_bg    = "#3d2e05"
             icon_color = C["yellow"]
             txt_color  = C["yellow"]
         elif nivel == "error":
-            card_bg    = "#1f0707"   # rojo oscuro
+            card_bg    = "#1f0707"
             icon_bg    = "#3d0a0a"
             icon_color = C["red"]
             txt_color  = C["red"]
-            self._notificar_error_impresora(msg)
-        else:   # offline / no detectada
-            card_bg    = "#1f0707"   # rojo oscuro (no bg_dark)
+        else:   # offline
+            card_bg    = "#1f0707"
             icon_bg    = "#3d0a0a"
             icon_color = C["red"]
             txt_color  = C["red"]
 
         try:
             self._frame_imp.configure(fg_color=card_bg)
-            self._badge_printer_icon.configure(
-                fg_color=icon_bg,
-                text_color=icon_color,
-            )
+            self._badge_printer_icon.configure(fg_color=icon_bg, text_color=icon_color)
             self._lbl_printer.configure(text=msg, text_color=txt_color)
         except Exception:
             pass
 
-    def _notificar_error_impresora(self, mensaje: str):
-        """
-        Rastrea el último error para evitar notificaciones duplicadas.
-        Solo registra; el badge en sidebar es la notificación visual.
-        """
-        if mensaje != self._ultimo_error_imp:
-            self._ultimo_error_imp = mensaje
-
-    # ─── Setup inicial ────────────────────────────────────────────────────────
-
-    def _mostrar_setup(self):
-        from ui.ventana_setup import VentanaSetup
-        VentanaSetup(self, self.cfg, self.db, callback=self._post_setup)
-
-    def _post_setup(self):
-        self.printer = Printer(self.cfg.get_nombre_impresora())
-        self._nav_actual = ""
-        self._navegar("principal")
+        # Empujar estado al panel de configuración si está abierto
+        if hasattr(self._panel_activo, "actualizar_estado_imp"):
+            try:
+                self._panel_activo.actualizar_estado_imp(estado)
+            except Exception:
+                pass
 
 
 # ─── Arranque ─────────────────────────────────────────────────────────────────

@@ -57,7 +57,7 @@ class ModalCobro(ctk.CTkToplevel):
     """
 
     ANCHO = 500
-    ALTO  = 590
+    ALTO  = 600
 
     def __init__(
         self,
