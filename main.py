@@ -44,6 +44,8 @@ class ParkingProApp(ctk.CTk):
         self.minsize(self.MIN_W, self.MIN_H)
         self.configure(fg_color=C["bg_root"])
 
+        self.after(100, lambda: self.state("zoomed"))
+
         try:
             ico = os.path.join(BASE_DIR, "assets", "icon.ico")
             if os.path.exists(ico):
