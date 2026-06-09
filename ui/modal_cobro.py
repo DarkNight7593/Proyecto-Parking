@@ -16,25 +16,12 @@ from ui.theme import C, fuente, color_tipo, hover_tipo, emoji_tipo, TIPO_POR_NOM
 def calcular_monto(minutos: int, tarifa_hora: float, tiempo_libre: int = 0) -> float:
     """
     Calcula el monto a cobrar según minutos y tarifa por hora.
-
-    Lógica de horas completas con tolerancia como gracia por ciclo:
-    - Si minutos <= tiempo_libre → gratis (período de tolerancia inicial).
-    - A partir de ahí se cobra en horas COMPLETAS, nunca fracciones:
-        · 1 min cobrables  →  1 hora
-        · 59 min cobrables →  1 hora
-        · 60 min cobrables →  2 horas   ← hora consumida; empieza la siguiente
-        · 61 min cobrables →  2 horas
-        · 119 min cobrables → 2 horas
-        · 120 min cobrables → 3 horas
-    - Con tolerancia=5:  límites totales en 65, 125, 185 min…
-      · 6–64 min  = 1 hora
-      · 65 min    = 2 horas   ("1h con 5 min ya paga dos horas")
-      · 66–124 min = 2 horas
     """
     if minutos <= tiempo_libre:
         return 0.0
-    minutos_cobrables = minutos - tiempo_libre          # > 0 garantizado
-    horas = minutos_cobrables // 60 + 1                 # horas completas consumidas
+    minutos_cobrables = minutos - tiempo_libre
+    import math
+    horas = math.ceil(minutos_cobrables / 60)
     return round(horas * tarifa_hora, 2)
 
 
@@ -51,9 +38,6 @@ def formatear_tiempo(minutos: int) -> str:
 class ModalCobro(ctk.CTkToplevel):
     """
     Ventana modal para registrar el cobro de una sesión activa.
-    - Muestra: placa, tipo, entrada, tiempo en vivo, monto estimado.
-    - Permite ajuste manual del monto antes de confirmar.
-    - El cobro y la impresión corren en un hilo daemon.
     """
 
     ANCHO = 500
@@ -101,8 +85,6 @@ class ModalCobro(ctk.CTkToplevel):
         self._build_ui()
         self._iniciar_timer()
 
-    # ─── Construcción de UI ───────────────────────────────────────────────────
-
     def _build_ui(self):
         # Header coloreado por tipo de vehículo
         hdr = ctk.CTkFrame(self, fg_color=self._color, height=76, corner_radius=0)
@@ -121,27 +103,20 @@ class ModalCobro(ctk.CTkToplevel):
             font=fuente(11), text_color="#c8daf5",
         ).place(relx=0.5, rely=0.78, anchor="center")
 
-        # Cuerpo
         body = ctk.CTkFrame(self, fg_color=C["bg_medium"], corner_radius=0)
         body.pack(fill="both", expand=True)
 
         # Tarjeta: Vehículo
         card_veh = ctk.CTkFrame(body, fg_color=C["bg_dark"], corner_radius=12)
         card_veh.pack(fill="x", padx=24, pady=(18, 0))
-        self._fila(card_veh, "🚘  Vehículo",
-                   f"{self._emoji}  {self.sesion['tipo_vehiculo']}")
-        self._fila(card_veh, "🔑  Placa",
-                   self.sesion["placa"],
-                   bold_valor=True, color_valor=self._color)
+        self._fila(card_veh, "🚘  Vehículo", f"{self._emoji}  {self.sesion['tipo_vehiculo']}")
+        self._fila(card_veh, "🔑  Placa", self.sesion["placa"], bold_valor=True, color_valor=self._color)
 
         # Tarjeta: Tiempos
         card_tiempo = ctk.CTkFrame(body, fg_color=C["bg_dark"], corner_radius=12)
         card_tiempo.pack(fill="x", padx=24, pady=10)
-
-        self._fila(card_tiempo, "🕐  Entrada",
-                   self._entrada.strftime("%d/%m/%Y  %I:%M %p"))
-        self._fila(card_tiempo, "🕐  Salida (ahora)",
-                   datetime.now().strftime("%d/%m/%Y  %I:%M %p"))
+        self._fila(card_tiempo, "🕐  Entrada", self._entrada.strftime("%d/%m/%Y  %I:%M %p"))
+        self._fila(card_tiempo, "🕐  Salida (ahora)", datetime.now().strftime("%d/%m/%Y  %I:%M %p"))
 
         self._lbl_tiempo = self._fila(
             card_tiempo, "⏱️  Tiempo total",
@@ -149,26 +124,19 @@ class ModalCobro(ctk.CTkToplevel):
         )
 
         if self._tl > 0:
-            self._fila(card_tiempo, "🎁  Tiempo libre",
-                       f"{self._tl} min (tolerancia)")
+            self._fila(card_tiempo, "🎁  Tiempo libre", f"{self._tl} min (tolerancia)")
 
-        self._fila(card_tiempo, "💰  Tarifa",
-                   f"{self.config.get_moneda()} {self._tarifa:.2f} / hora")
+        self._fila(card_tiempo, "💰  Tarifa", f"{self.config.get_moneda()} {self._tarifa:.2f} / hora")
 
         # Tarjeta: Monto
-        card_monto = ctk.CTkFrame(
-            body, fg_color=C["kpi_bg"], corner_radius=12,
-            border_color=self._color, border_width=2,
-        )
+        card_monto = ctk.CTkFrame(body, fg_color=C["kpi_bg"], corner_radius=12, border_color=self._color, border_width=2)
         card_monto.pack(fill="x", padx=24)
 
-        ctk.CTkLabel(card_monto, text="TOTAL A COBRAR",
-                     font=fuente(11), text_color=C["text_3"]).pack(pady=(14, 2))
+        ctk.CTkLabel(card_monto, text="TOTAL A COBRAR", font=fuente(11), text_color=C["text_3"]).pack(pady=(14, 2))
 
         fila_monto = ctk.CTkFrame(card_monto, fg_color="transparent")
         fila_monto.pack(pady=(0, 6))
-        ctk.CTkLabel(fila_monto, text=self.config.get_moneda(),
-                     font=fuente(22, bold=True), text_color=C["text_2"]).pack(side="left")
+        ctk.CTkLabel(fila_monto, text=self.config.get_moneda(), font=fuente(22, bold=True), text_color=C["text_2"]).pack(side="left")
 
         self._var_monto = ctk.StringVar(value=f"{self._monto_base:.2f}")
         self._entry_monto = ctk.CTkEntry(
@@ -179,19 +147,18 @@ class ModalCobro(ctk.CTkToplevel):
         )
         self._entry_monto.pack(side="left")
 
-        ctk.CTkLabel(card_monto,
-                     text="Edita el monto si necesitas hacer un ajuste manual",
-                     font=fuente(10), text_color=C["text_3"]).pack(pady=(0, 12))
+        ctk.CTkLabel(card_monto, text="Edita el monto si necesitas hacer un ajuste manual", font=fuente(10), text_color=C["text_3"]).pack(pady=(0, 12))
 
         # Opción imprimir
         self._var_imprimir = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
+        self._chk_imprimir = ctk.CTkCheckBox(
             body, text="Imprimir ticket de salida",
             variable=self._var_imprimir,
             fg_color=self._color, hover_color=self._hover,
             checkmark_color="white",
             text_color=C["text_2"], font=fuente(12),
-        ).pack(pady=(14, 0))
+        )
+        self._chk_imprimir.pack(pady=(14, 0))
 
         # Botones
         frame_btns = ctk.CTkFrame(body, fg_color="transparent")
@@ -216,25 +183,13 @@ class ModalCobro(ctk.CTkToplevel):
         self._lbl_error = ctk.CTkLabel(body, text="", font=fuente(11), text_color=C["red"])
         self._lbl_error.pack()
 
-    def _fila(
-        self, parent, label: str, valor: str,
-        bold_valor: bool = False, color_valor: str = None,
-    ) -> ctk.CTkLabel:
+    def _fila(self, parent, label: str, valor: str, bold_valor: bool = False, color_valor: str = None) -> ctk.CTkLabel:
         frame = ctk.CTkFrame(parent, fg_color="transparent")
         frame.pack(fill="x", padx=16, pady=5)
-        ctk.CTkLabel(
-            frame, text=label, font=fuente(12),
-            text_color=C["text_3"], width=160, anchor="w",
-        ).pack(side="left")
-        lbl = ctk.CTkLabel(
-            frame, text=valor,
-            font=fuente(12, bold=bold_valor),
-            text_color=color_valor or C["text_1"], anchor="e",
-        )
+        ctk.CTkLabel(frame, text=label, font=fuente(12), text_color=C["text_3"], width=160, anchor="w").pack(side="left")
+        lbl = ctk.CTkLabel(frame, text=valor, font=fuente(12, bold=bold_valor), text_color=color_valor or C["text_1"], anchor="e")
         lbl.pack(side="right")
         return lbl
-
-    # ─── Timer en vivo ────────────────────────────────────────────────────────
 
     def _iniciar_timer(self):
         self._tick()
@@ -247,7 +202,6 @@ class ModalCobro(ctk.CTkToplevel):
             self._minutos = minutos
             self._lbl_tiempo.configure(text=formatear_tiempo(minutos))
 
-            # Actualizar monto solo si el usuario no lo ha editado
             try:
                 monto_actual = float(self._var_monto.get())
                 monto_nuevo  = calcular_monto(minutos, self._tarifa, self._tl)
@@ -261,8 +215,6 @@ class ModalCobro(ctk.CTkToplevel):
         except Exception:
             pass
 
-    # ─── Cobro ────────────────────────────────────────────────────────────────
-
     def _cancelar(self):
         if not self._procesando:
             self.destroy()
@@ -271,7 +223,7 @@ class ModalCobro(ctk.CTkToplevel):
         if self._procesando:
             return
 
-        # Validar monto
+        # 1. Validar formato del monto
         try:
             monto = float(self._var_monto.get())
             if monto < 0:
@@ -281,24 +233,44 @@ class ModalCobro(ctk.CTkToplevel):
             self._lbl_error.configure(text="⚠ Ingresa un monto válido")
             return
 
+        imprimir = self._var_imprimir.get()
+
+        # ─── INTERCEPCIÓN DE SEGURIDAD DE IMPRESORA ──────────────────────────
+        # Evaluamos el estado del hardware antes de tocar la Base de Datos.
+        # Pasamos 'self' como parent para que la alerta modal se centre sobre este Cobro.
+        eleccion = self.printer.verificar_estado_para_proceder(self, impresion_solicitada=imprimir)
+        
+        if eleccion == "intentar":
+            return  # Abortamos de inmediato. Nada cambia, la ventana sigue lista.
+        elif eleccion == "continuar":
+            # Bypass manual: El usuario omitirá el ticket para destrabar la cola
+            self._var_imprimir.set(False)
+            imprimir = False
+        # ─────────────────────────────────────────────────────────────────────
+
+        # El flujo seguro continúa aquí si todo está OK o si se seleccionó Bypass Digital:
         self._procesando = True
         self._entry_monto.configure(border_width=0)
         self._lbl_error.configure(text="")
         self._btn_cobrar.configure(state="disabled", text="⏳  Procesando...")
 
-        imprimir = self._var_imprimir.get()
-        sesion   = self.sesion
+        sesion = self.sesion
 
         def _worker():
             try:
+                # Modificamos SQLite de forma segura
                 sesion_cobrada = self.db.cobrar_sesion(sesion["id"], monto)
 
+                # Si el bypass no se activó, mandamos la orden física de impresión
                 if imprimir:
+                    datos = self.config.get_datos_negocio()
                     self.printer.imprimir_cobro(
                         sesion_cobrada,
                         nombre_negocio=self.config.get_nombre_negocio(),
                         tarifa_hora=self._tarifa,
                         moneda=self.config.get_moneda(),
+                        direccion=datos["direccion"], 
+                        telefono=datos["telefono"]
                     )
 
                 def _ok():
@@ -313,8 +285,7 @@ class ModalCobro(ctk.CTkToplevel):
                 def _err():
                     self._procesando = False
                     if self.winfo_exists():
-                        self._btn_cobrar.configure(
-                            state="normal", text="✓  Confirmar Cobro")
+                        self._btn_cobrar.configure(state="normal", text="✓  Confirmar Cobro")
                         self._lbl_error.configure(text=f"⚠ Error: {e}")
 
                 self.after(0, _err)

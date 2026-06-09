@@ -275,9 +275,12 @@ class PanelConfiguracion(ctk.CTkFrame):
         fila_act = ctk.CTkFrame(self._card_activa, fg_color="transparent")
         fila_act.pack(fill="x", padx=12, pady=(8, 0))
 
+        # Evalúa si está vacía o es el valor de fábrica para mostrar "No seleccionada"
+        nombre_mostrar = self._imp_seleccionada if self._imp_seleccionada and self._imp_seleccionada != "TicketeraEstacionamiento" else "Ninguna (No seleccionada)"
+
         self._lbl_imp_activa = ctk.CTkLabel(
             fila_act,
-            text=f"🖨️  {self._imp_seleccionada}",
+            text=f"🖨️  {nombre_mostrar}",
             font=fuente(14, bold=True), text_color=C["green"], anchor="w",
         )
         self._lbl_imp_activa.pack(side="left", fill="x", expand=True)
@@ -412,10 +415,13 @@ class PanelConfiguracion(ctk.CTkFrame):
             self._btn_reparar.pack(side="left")
 
         try:
+            # Formateamos nuevamente el nombre por si el loop intenta sobreescribirlo
+            nombre_mostrar = self._imp_seleccionada if self._imp_seleccionada and self._imp_seleccionada != "TicketeraEstacionamiento" else "Ninguna (No seleccionada)"
+            
             self._lbl_estado_imp.configure(text=msg, text_color=color_txt)
             self._card_activa.configure(border_color=color_borde)
             self._lbl_imp_activa.configure(
-                text=f"🖨️  {self._imp_seleccionada}",
+                text=f"🖨️  {nombre_mostrar}",
                 text_color=color_titulo,
             )
         except Exception:

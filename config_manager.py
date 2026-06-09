@@ -18,8 +18,8 @@ class ConfigManager:
             "ruc":       "",
         },
         "impresora": {
-            "nombre":    "TicketeraEstacionamiento",
-            "activa":    "true",
+            "nombre":    "",
+            "activa":    "True",
             "papel_mm":  "80",
         },
         "sistema": {

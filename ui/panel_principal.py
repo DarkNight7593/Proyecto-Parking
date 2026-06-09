@@ -4,6 +4,7 @@ ParkingPro - Panel Principal (operación diaria)
 Funcionalidades:
   • Selección de tipo de vehículo con botones de color por categoría.
   • Registro de placa y entrada (con validación y anti-doble-clic).
+  • Barra de búsqueda predictiva en tiempo real por placa (Optimizada en memoria).
   • Tabla en vivo de vehículos activos con timer cada 30 s.
   • Botón 💳 Cobrar: abre ModalCobro para procesar el pago.
   • Botón ✕ Cancelar: elimina el registro en caso de error de placa.
@@ -37,7 +38,8 @@ class PanelPrincipal(ctk.CTkFrame):
         self.printer = printer
 
         self._tipo_sel:      Optional[Dict] = None   # tipo de vehículo seleccionado
-        self._filas_activas: List[Dict]     = []     # lista de sesiones activas en pantalla
+        self._todos_los_activos: List[Dict] = []     # Caché maestro de activos (para optimizar búsqueda)
+        self._filas_activas: List[Dict]     = []     # Lista filtrada/visible en pantalla
         self._tipo_btns:     List[ctk.CTkButton] = [] # botones de tipo de vehículo
         self._registrando = False  # bloqueo anti-doble-clic
 
@@ -138,6 +140,26 @@ class PanelPrincipal(ctk.CTkFrame):
         frame_tabla = ctk.CTkFrame(self, fg_color=C["bg_dark"], corner_radius=0)
         frame_tabla.pack(fill="both", expand=True)
 
+        # ── BARRA DE BÚSQUEDA (Nueva sección optimizada) ───────────────────
+        frame_busqueda = ctk.CTkFrame(frame_tabla, fg_color="transparent")
+        frame_busqueda.pack(fill="x", padx=24, pady=(12, 8))
+
+        ctk.CTkLabel(
+            frame_busqueda, text="🔍 Buscar por Placa:",
+            font=fuente(12, bold=True), text_color=C["text_2"]
+        ).pack(side="left", padx=(0, 8))
+
+        self._entry_buscar = ctk.CTkEntry(
+            frame_busqueda,
+            placeholder_text="Escribe para buscar...",
+            font=fuente(12), text_color=C["text_1"],
+            fg_color=C["bg_medium"], border_color=C["border"], border_width=1,
+            height=30, width=220,
+        )
+        self._entry_buscar.pack(side="left")
+        # Enlazar la pulsación de teclas al método de filtrado rápido
+        self._entry_buscar.bind("<KeyRelease>", lambda e: self._aplicar_filtro())
+
         # Cabecera de la tabla
         hdr_tabla = ctk.CTkFrame(
             frame_tabla, fg_color=C["sidebar"], height=38, corner_radius=0)
@@ -212,6 +234,17 @@ class PanelPrincipal(ctk.CTkFrame):
             self._mostrar_msg("⚠ Escribe la placa del vehículo", C["yellow"])
             self._entry_placa.configure(border_color=C["yellow"])
             return
+        
+        # ─── NUEVA SEGURIDAD CENTRALIZADA DE IMPRESORA ───────────────────────
+        imprimir_entrada = self.config.getbool("impresora", "activa", fallback=True)
+        
+        eleccion = self.printer.verificar_estado_para_proceder(self, impresion_solicitada=imprimir_entrada)
+        
+        if eleccion == "intentar":
+            return  # Aborta el registro para que arreglen la ticketera. No entra en SQLite.
+        elif eleccion == "continuar":
+            imprimir_entrada = False  # El cajero bypassó el error para entrar sin ticket físico
+        # ─────────────────────────────────────────────────────────────────────
 
         self._registrando = True
         self._btn_registrar.configure(state="disabled", text="⏳  Registrando...")
@@ -221,12 +254,17 @@ class PanelPrincipal(ctk.CTkFrame):
             """Registra en BD e imprime el ticket de entrada."""
             try:
                 sesion = self.db.registrar_entrada(placa, tipo_nombre)
-                # Imprime el ticket (puede fallar silenciosamente si no hay impresora)
-                self.printer.imprimir_entrada(
-                    sesion,
-                    nombre_negocio=self.config.get_nombre_negocio(),
-                    moneda=self.config.get_moneda(),
-                )
+                
+                # Ejecuta la impresión sólo si pasó el filtro de seguridad
+                if imprimir_entrada:
+                    datos = self.config.get_datos_negocio() 
+                    self.printer.imprimir_entrada(
+                        sesion,
+                        nombre_negocio=self.config.get_nombre_negocio(),
+                        direccion=datos["direccion"], 
+                        telefono=datos["telefono"]
+                    )
+                
                 self.after(0, lambda: self._post_registro_ok(placa))
             except ValueError as e:
                 # Error de negocio (placa duplicada, etc.)
@@ -256,18 +294,39 @@ class PanelPrincipal(ctk.CTkFrame):
         self._lbl_msg.configure(text=texto, text_color=color)
         self.after(4_000, lambda: self._lbl_msg.configure(text=""))
 
-    # ─── Tabla de vehículos activos ───────────────────────────────────────────
+    # ─── Tabla de vehículos activos y Filtrado ────────────────────────────────
 
     def _cargar_activos(self):
         """Carga la lista de sesiones activas desde la BD en un hilo daemon."""
         def _worker():
             try:
                 activos = self.db.get_sesiones_activas()
-                self.after(0, lambda: self._render_activos(activos))
+                # Redirigir al manejador maestro de datos
+                self.after(0, lambda: self._post_cargar_activos(activos))
             except Exception:
                 pass  # Error silencioso; la tabla simplemente no se actualiza
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _post_cargar_activos(self, activos: List[Dict]):
+        """Almacena la lista completa en memoria y procesa el filtro actual."""
+        self._todos_los_activos = activos
+        self._aplicar_filtro()
+
+    def _aplicar_filtro(self):
+        """Filtra la lista de vehículos en memoria según lo escrito por el usuario."""
+        busqueda = self._entry_buscar.get().strip().upper()
+
+        if not busqueda:
+            # Si se eliminó todo, renderiza la lista original intacta
+            self._render_activos(self._todos_los_activos)
+        else:
+            # Filtrado ultra-veloz en memoria (aquellos que EMPIEZAN con la búsqueda)
+            filtrados = [
+                sesion for sesion in self._todos_los_activos
+                if sesion["placa"].upper().startswith(busqueda)
+            ]
+            self._render_activos(filtrados)
 
     def _render_activos(self, activos: List[Dict]):
         """
@@ -284,7 +343,7 @@ class PanelPrincipal(ctk.CTkFrame):
             w.destroy()
 
         if not activos:
-            # Estado vacío: mensaje centrado
+            # Estado vacío: mensaje centrado (sirve también si la búsqueda no arroja resultados)
             ctk.CTkLabel(
                 self._scroll,
                 text="Sin vehículos activos  🅿",
@@ -406,18 +465,16 @@ class PanelPrincipal(ctk.CTkFrame):
     def _cancelar_sesion(self, sesion: Dict):
         """
         Cancela (elimina) un registro activo tras confirmación del usuario.
-        Útil cuando se ingresó una placa incorrecta.
-        La sesión queda con estado='cancelado' en la BD para auditoría;
-        no aparece en la tabla de activos ni se cuenta en los ingresos.
+        La sesión queda con estado='cancelado' en la BD para auditoría.
         """
         placa  = sesion.get("placa", "")
         ticket = sesion.get("ticket_numero", "")
 
-        # Confirmación obligatoria antes de cancelar
         confirmado = messagebox.askyesno(
             "Cancelar Registro",
             f"¿Eliminar el registro de la placa  {placa}?\n"
             f"Ticket: {ticket}\n\n"
+            f"No se registrará el cobro del ticket\n\n"
             "¿Confirmas la cancelación?",
         )
 
@@ -426,7 +483,6 @@ class PanelPrincipal(ctk.CTkFrame):
 
         try:
             self.db.cancelar_sesion(sesion["id"])
-            # Recargar la tabla para reflejar el cambio
             self._cargar_activos()
             self._mostrar_msg(f"✓ Registro {ticket} cancelado", C["yellow"])
         except Exception as e:
@@ -438,7 +494,6 @@ class PanelPrincipal(ctk.CTkFrame):
         """
         Loop principal del timer. Se ejecuta en el hilo de UI cada 30 segundos.
         Actualiza los labels de tiempo y monto estimado de cada fila activa.
-        Las referencias a los labels están guardadas en self._filas_activas.
         """
         if not self.winfo_exists():
             return
@@ -454,7 +509,7 @@ class PanelPrincipal(ctk.CTkFrame):
             tarifa = sesion.get("_tarifa", 2.0)
 
             if not (lbl_t and ent_dt):
-                continue  # La fila fue destruida (el scroll se recargó)
+                continue
 
             try:
                 mins  = max(0, int((ahora - ent_dt).total_seconds() / 60))
@@ -462,7 +517,7 @@ class PanelPrincipal(ctk.CTkFrame):
                 lbl_t.configure(text=formatear_tiempo(mins))
                 lbl_m.configure(text=f"{moneda} {monto:.2f}")
             except Exception:
-                pass  # Widget destruido o error de cálculo — ignorar
+                pass
 
         # Programar siguiente actualización en 30 segundos
         self.after(30_000, self._loop_timer)

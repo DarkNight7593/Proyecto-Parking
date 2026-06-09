@@ -203,18 +203,27 @@ class Database:
     def get_resumen_rango(self, fecha_inicio: str, fecha_fin: str) -> Dict:
         """
         KPIs agregados para un rango de fechas.
-        Retorna: total_vehiculos, ingresos (sum), prom_minutos (avg), activos_ahora.
+
+        Retorna:
+          total_vehiculos  — todos los registros del período (cualquier estado)
+          cobrados         — sesiones que terminaron con pago exitoso
+          cancelados       — sesiones anuladas sin cobro (ej. entrada por error)
+          activos_ahora    — vehículos aún dentro del estacionamiento
+          ingresos         — suma del monto cobrado (solo estado='cobrado')
+          prom_minutos     — tiempo promedio de estadía (solo sesiones cobradas)
 
         Ejemplo: get_resumen_rango("2025-01-01", "2025-01-31")
         """
         conn = self._conn()
         row = conn.execute("""
             SELECT
-                COUNT(*)                                                     AS total_vehiculos,
-                COALESCE(SUM(CASE WHEN estado='cobrado' THEN monto END), 0) AS ingresos,
+                COUNT(*)                                                      AS total_vehiculos,
+                COUNT(CASE WHEN estado='cobrado'   THEN 1 END)                AS cobrados,
+                COUNT(CASE WHEN estado='cancelado' THEN 1 END)                AS cancelados,
+                COUNT(CASE WHEN estado='activo'    THEN 1 END)                AS activos_ahora,
+                COALESCE(SUM(CASE WHEN estado='cobrado' THEN monto END), 0)   AS ingresos,
                 COALESCE(AVG(CASE WHEN estado='cobrado'
-                                  THEN minutos_total END), 0)               AS prom_minutos,
-                COUNT(CASE WHEN estado='activo' THEN 1 END)                 AS activos_ahora
+                                  THEN minutos_total END), 0)                 AS prom_minutos
             FROM sesiones
             WHERE DATE(hora_entrada) BETWEEN ? AND ?
         """, (fecha_inicio, fecha_fin)).fetchone()
@@ -341,15 +350,17 @@ class Database:
     def get_totales_globales(self) -> Dict:
         """
         Totales acumulados de toda la historia del negocio.
-        Útil para pantallas de resumen general.
+        Incluye desglose entre sesiones cobradas y canceladas.
+        Útil para pantallas de resumen general y exportación Excel.
         """
         conn = self._conn()
         row  = conn.execute("""
             SELECT
-                COUNT(*)               AS total_sesiones,
-                COALESCE(SUM(monto),0) AS ingresos_totales,
-                COALESCE(MAX(monto),0) AS ticket_maximo
+                COUNT(CASE WHEN estado='cobrado'   THEN 1 END) AS total_sesiones,
+                COUNT(CASE WHEN estado='cancelado' THEN 1 END) AS canceladas,
+                COUNT(*)                                        AS total_ingresaron,
+                COALESCE(SUM(CASE WHEN estado='cobrado' THEN monto END), 0) AS ingresos_totales,
+                COALESCE(MAX(CASE WHEN estado='cobrado' THEN monto END), 0) AS ticket_maximo
             FROM sesiones
-            WHERE estado='cobrado'
         """).fetchone()
         return dict(row) if row else {}

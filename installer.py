@@ -124,8 +124,19 @@ class PrinterInstaller:
                 "Select-Object FriendlyName, InstanceId, Class | "
                 "ConvertTo-Csv -NoTypeInformation",
             ]
-            res    = subprocess.run(cmd, capture_output=True, text=True,
-                                    errors="ignore", timeout=20)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                errors="ignore",
+                timeout=20,
+                startupinfo=startupinfo,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
             reader = csv.reader(io.StringIO(res.stdout))
             next(reader, None)  # saltar cabecera
 
@@ -160,53 +171,65 @@ class PrinterInstaller:
     # ─── Detección de puerto ──────────────────────────────────────────────────
 
     def detectar_puerto(self, log: Callable = None) -> str:
-            """
-            Detecta el puerto USB exacto del hardware conectado actualmente
-            leyendo el Registro de Windows y los dispositivos Plug & Play activos.
-            """
-            if not WINDOWS:
-                return "USB001"
-
-            def _log(m):
-                if log:
-                    log(m)
-
-            _log("🔍 Buscando puerto físico en el Registro de Windows...")
-
-            try:
-                # Ampliamos la búsqueda: Cualquier dispositivo PnP 'Presente' (conectado ahora mismo)
-                # que tenga 'USB' en su ID (esto cubre tanto 'USB\' como 'USBPRINT\')
-                ps_script = (
-                    "$devs = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | "
-                    "Where-Object { $_.InstanceId -match 'USB' }; "
-                    "foreach ($d in $devs) { "
-                    "  $path = 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\' + $d.InstanceId + '\\Device Parameters'; "
-                    "  $p = (Get-ItemProperty -Path $path -Name 'PortName' -ErrorAction SilentlyContinue).PortName; "
-                    "  if ($p -match '^USB\\d+') { Write-Output $p } "
-                    "}"
-                )
-                
-                cmd = ["powershell", "-NoProfile", "-Command", ps_script]
-                res = subprocess.run(cmd, capture_output=True, text=True, errors="ignore", timeout=15)
-                
-                # Limpiamos los resultados
-                puertos_activos = [line.strip() for line in res.stdout.splitlines() if line.strip().startswith("USB")]
-                
-                if puertos_activos:
-                    # Si detecta varios puertos activos, tomamos el más alto/reciente
-                    puertos_activos.sort()
-                    puerto_real = puertos_activos[-1] 
-                    
-                    _log(f"➔ ¡Ticketera encontrada físicamente en el puerto: {puerto_real}!")
-                    return puerto_real
-                else:
-                    _log("⚠ No se detectó ninguna ticketera conectada y encendida.")
-                    
-            except Exception as e:
-                _log(f"⚠ Error en detección avanzada: {e}")
-
-            _log("➔ Usando puerto por defecto: USB001")
+        """
+        Detecta el puerto USB exacto del hardware conectado actualmente
+        leyendo el Registro de Windows y los dispositivos Plug & Play activos.
+        """
+        if not WINDOWS:
             return "USB001"
+
+        def _log(m):
+            if log:
+                log(m)
+
+        _log("🔍 Buscando puerto físico en el Registro de Windows...")
+
+        try:
+            # Ampliamos la búsqueda: Cualquier dispositivo PnP 'Presente' (conectado ahora mismo)
+            # que tenga 'USB' en su ID (esto cubre tanto 'USB\' como 'USBPRINT\')
+            ps_script = (
+                "$devs = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | "
+                "Where-Object { $_.InstanceId -match 'USB' }; "
+                "foreach ($d in $devs) { "
+                "  $path = 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\' + $d.InstanceId + '\\Device Parameters'; "
+                "  $p = (Get-ItemProperty -Path $path -Name 'PortName' -ErrorAction SilentlyContinue).PortName; "
+                "  if ($p -match '^USB\\d+') { Write-Output $p } "
+                "}"
+            )
+
+            cmd = ["powershell", "-NoProfile", "-Command", ps_script]
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                errors="ignore",
+                timeout=20,
+                startupinfo=startupinfo,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            # Limpiamos los resultados
+            puertos_activos = [
+                line.strip() for line in res.stdout.splitlines()
+                if line.strip().startswith("USB")
+            ]
+
+            if puertos_activos:
+                # Si detecta varios puertos activos, tomamos el más alto/reciente
+                puertos_activos.sort()
+                puerto_real = puertos_activos[-1]
+                _log(f"➔ ¡Ticketera encontrada físicamente en el puerto: {puerto_real}!")
+                return puerto_real
+            else:
+                _log("⚠ No se detectó ninguna ticketera conectada y encendida.")
+
+        except Exception as e:
+            _log(f"⚠ Error en detección avanzada: {e}")
+
+        _log("➔ Usando puerto por defecto: USB001")
+        return "USB001"
   
     # ─── Instalación ──────────────────────────────────────────────────────────
 
@@ -427,12 +450,14 @@ class PrinterInstaller:
             return False, "Impresora no instalada."
         try:
             h = win32print.OpenPrinter(self.nombre_impresora)
-            win32print.StartDocPrinter(h, 1, ("Test ParkingPro", None, "RAW"))
-            win32print.StartPagePrinter(h)
-            win32print.WritePrinter(h, b"\x1b@TEST DE IMPRESORA PARKINGPRO\n\n\n\n\n\x1bi")
-            win32print.EndPagePrinter(h)
-            win32print.EndDocPrinter(h)
-            win32print.ClosePrinter(h)
+            try:
+                win32print.StartDocPrinter(h, 1, ("Test ParkingPro", None, "RAW"))
+                win32print.StartPagePrinter(h)
+                win32print.WritePrinter(h, b"\x1b@TEST DE IMPRESORA PARKINGPRO\n\n\n\n\n\x1bi")
+                win32print.EndPagePrinter(h)
+                win32print.EndDocPrinter(h)
+            finally:
+                win32print.ClosePrinter(h)   # FIX: garantiza cierre aunque WritePrinter falle
             return True, "Página de prueba enviada."
         except Exception as e:
             return False, str(e)

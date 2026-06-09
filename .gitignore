@@ -10,3 +10,6 @@ parkingpro.db
 
 # Archivos de configuración local (¡importante para no subir contraseñas!)
 config.ini
+
+build/
+ParkingPro.spec

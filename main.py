@@ -145,7 +145,7 @@ class ParkingProApp(ctk.CTk):
         self._lbl_activos_sb.pack(padx=12, pady=(0, 8))
 
         # Espaciador flexible
-        ctk.CTkFrame(sb, fg_color="transparent").pack(fill="both", expand=True)
+        #ctk.CTkFrame(sb, fg_color="transparent").pack(fill="both", expand=True)
 
         # ── Badge de impresora ────────────────────────────────────────────
         ctk.CTkFrame(sb, fg_color=C["border"], height=1).pack(fill="x", padx=14,
