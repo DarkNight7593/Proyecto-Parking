@@ -8,7 +8,8 @@ Cambios vs versión anterior:
     get_por_tipo_hoy) — reemplazados por métodos genéricos de rango.
   - Añadidos: get_resumen_rango, get_ingresos_por_hora,
     get_ingresos_por_dia, get_ingresos_por_mes_en_año,
-    get_por_tipo_rango, get_historial_rango.
+    get_por_tipo_rango, get_historial_rango, get_historial_rango_count.
+  - get_historial_rango ahora acepta offset para paginación.
 """
 import sqlite3
 import threading
@@ -146,11 +147,10 @@ class Database:
         ).fetchone()
         return dict(row) if row else None
 
-    def cobrar_sesion(self, sesion_id: int, monto: float) -> Dict:
+    def cobrar_sesion(self, sesion_id: int, monto: float, minutos_fijos: Optional[int] = None) -> Dict:
         """
         Cierra la sesión registrando hora de salida, duración y monto pagado.
-        Lanza ValueError si la sesión no existe o no está activa.
-        Retorna la sesión actualizada.
+        Acepta 'minutos_fijos' para sincronizar el ticket con lo que el operador vio en pantalla.
         """
         conn   = self._conn()
         sesion = self.get_sesion_por_id(sesion_id)
@@ -160,11 +160,15 @@ class Database:
         if sesion["estado"] != "activo":
             raise ValueError(f"La sesión {sesion_id} no está activa")
 
-        ahora   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        entrada = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
-        salida  = datetime.strptime(ahora, "%Y-%m-%d %H:%M:%S")
-        # Mínimo 1 minuto para evitar cobros de 0 minutos
-        minutos = max(1, int((salida - entrada).total_seconds() / 60))
+        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # FIX: Usar la "fotografía" de los minutos que vio el cajero
+        if minutos_fijos is not None:
+            minutos = minutos_fijos
+        else:
+            entrada = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
+            salida  = datetime.strptime(ahora, "%Y-%m-%d %H:%M:%S")
+            minutos = max(1, int((salida - entrada).total_seconds() / 60))
 
         conn.execute(
             """UPDATE sesiones
@@ -176,17 +180,26 @@ class Database:
         return self.get_sesion_por_id(sesion_id)
 
     def cancelar_sesion(self, sesion_id: int):
-        """
-        Cancela una sesión activa (sin cobro).
-        La sesión queda con estado='cancelado' para auditoría.
-        No se puede cancelar una sesión ya cobrada.
-        """
-        conn = self._conn()
-        conn.execute(
-            "UPDATE sesiones SET estado='cancelado' WHERE id=? AND estado='activo'",
-            (sesion_id,),
-        )
-        conn.commit()
+            conn = self._conn()
+            
+            # Guardamos el resultado del execute en una variable 'cursor'
+            cursor = conn.execute(
+                "UPDATE sesiones SET estado='cancelado' WHERE id=? AND estado='activo'",
+                (sesion_id,)
+            )
+            conn.commit()
+            
+            # Verificamos si realmente se actualizó alguna fila
+            if cursor.rowcount == 0:
+                # Si no se actualizó nada, investigamos por qué falló
+                sesion = self.get_sesion_por_id(sesion_id)
+                if not sesion:
+                    raise ValueError(f"Sesión {sesion_id} no encontrada en la base de datos.")
+                
+                # Si la sesión existe, es porque su estado ya no era 'activo'
+                raise ValueError(
+                    f"La sesión ya está '{sesion['estado']}' y no se puede cancelar."
+                )
 
     def contar_activos(self) -> int:
         """Cuenta los vehículos actualmente en el estacionamiento."""
@@ -305,11 +318,25 @@ class Database:
         """, (fecha_inicio, fecha_fin)).fetchall()
         return [dict(r) for r in rows]
 
+    def get_historial_rango_count(self, fecha_inicio: str, fecha_fin: str) -> int:
+        """
+        Cuenta el total de sesiones finalizadas (cobradas y canceladas) en un rango.
+        Usado para calcular el número total de páginas en la vista paginada.
+        """
+        conn = self._conn()
+        row = conn.execute("""
+            SELECT COUNT(*) AS total FROM sesiones
+            WHERE estado != 'activo'
+              AND DATE(hora_entrada) BETWEEN ? AND ?
+        """, (fecha_inicio, fecha_fin)).fetchone()
+        return row["total"] if row else 0
+
     def get_historial_rango(self, fecha_inicio: str, fecha_fin: str,
-                            limit: int = 30) -> List[Dict]:
+                            limit: int = 30, offset: int = 0) -> List[Dict]:
         """
         Historial de sesiones finalizadas (cobradas y canceladas) en un rango.
         No incluye sesiones activas. Ordenadas por hora de entrada descendente.
+        Soporta paginación mediante limit y offset.
         """
         conn = self._conn()
         rows = conn.execute("""
@@ -317,8 +344,8 @@ class Database:
             WHERE estado != 'activo'
               AND DATE(hora_entrada) BETWEEN ? AND ?
             ORDER BY hora_entrada DESC
-            LIMIT ?
-        """, (fecha_inicio, fecha_fin, limit)).fetchall()
+            LIMIT ? OFFSET ?
+        """, (fecha_inicio, fecha_fin, limit, offset)).fetchall()
         return [dict(r) for r in rows]
 
     def get_historial(self, limit: int = 100, offset: int = 0,

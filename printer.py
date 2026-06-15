@@ -7,7 +7,6 @@ Detección de estado usa WMIC (Win32_Printer) para capturar desconexiones USB
 en tiempo real, mucho más fiable que el Status del spooler de Windows.
 """
 import os
-import subprocess
 from datetime import datetime
 from typing import Dict
 
@@ -16,9 +15,6 @@ try:
     WINDOWS_PRINT = True
 except ImportError:
     WINDOWS_PRINT = False
-
-# ─── Evitar ventana de consola al llamar WMIC ─────────────────────────────────
-_CREATE_NO_WINDOW = 0x08000000
 
 # ─── Comandos ESC/POS ─────────────────────────────────────────────────────────
 ESC = b'\x1b'
@@ -36,30 +32,6 @@ CUT_FULL     = ESC + b'i'
 CUT_GS       = GS  + b'V\x00'
 
 ANCHO_TICKET = 42
-
-# ─── WMI PrinterStatus codes (CIM_Printer.PrinterStatus) ──────────────────────
-_WMI_PRINTER_STATUS = {
-    1: ("warning", "⚠ Estado desconocido"),
-    2: ("warning", "⚠ Estado no disponible"),
-    3: ("ok",      "✓ Lista para imprimir"),
-    4: ("ok",      "🖨 Imprimiendo..."),
-    5: ("ok",      "⚙ Calentando..."),
-    6: ("error",   "⚠ Impresión detenida"),
-    7: ("offline", "✗ Desconectada / Offline"),
-}
-
-# ─── WMI DetectedErrorState codes (CIM_Printer.DetectedErrorState) ────────────
-_WMI_ERROR_STATE = {
-    3:  ("warning", "⚠ Papel bajo"),
-    4:  ("error",   "⚠ Sin papel"),
-    5:  ("warning", "⚠ Tóner/tinta bajo"),
-    6:  ("error",   "⚠ Sin tóner/tinta"),
-    7:  ("error",   "⚠ Cubierta abierta"),
-    8:  ("error",   "⚠ Papel atascado"),
-    9:  ("offline", "✗ Desconectada / Offline"),
-    10: ("warning", "⚠ Requiere servicio"),
-    11: ("error",   "⚠ Bandeja de salida llena"),
-}
 
 # ─── Mapa de estados win32print (PRINTER_INFO_2.Status) ──────────────────────
 _STATUS_MAP = [

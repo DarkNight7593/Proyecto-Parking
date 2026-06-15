@@ -3,6 +3,7 @@ ParkingPro - Modal de cobro
 Muestra el resumen de la sesión y confirma el cobro e impresión del ticket.
 Threading: el cobro y la impresión corren en hilo daemon para no congelar la UI.
 """
+import math 
 import threading
 import customtkinter as ctk
 from datetime import datetime
@@ -16,11 +17,11 @@ from ui.theme import C, fuente, color_tipo, hover_tipo, emoji_tipo, TIPO_POR_NOM
 def calcular_monto(minutos: int, tarifa_hora: float, tiempo_libre: int = 0) -> float:
     """
     Calcula el monto a cobrar según minutos y tarifa por hora.
+    Aplica el tiempo libre como periodo de gracia para cada hora iniciada.
     """
     if minutos <= tiempo_libre:
         return 0.0
     minutos_cobrables = minutos - tiempo_libre
-    import math
     horas = math.ceil(minutos_cobrables / 60)
     return round(horas * tarifa_hora, 2)
 
@@ -50,7 +51,7 @@ class ModalCobro(ctk.CTkToplevel):
         config,
         db,
         printer,
-        on_cobro_exitoso: Callable[[Dict], None] = None,
+        on_cobro_exitoso: Optional[Callable[[Dict], None]] = None, # ← CORREGIDO TYPE HINT
     ):
         super().__init__(parent)
         self.sesion           = sesion
@@ -83,7 +84,7 @@ class ModalCobro(ctk.CTkToplevel):
         self.geometry(f"{self.ANCHO}x{self.ALTO}+{px}+{py}")
 
         self._build_ui()
-        self._iniciar_timer()
+        self._tick() # ← LLAMADA DIRECTA, ELIMINADO _iniciar_timer()
 
     def _build_ui(self):
         # Header coloreado por tipo de vehículo
@@ -191,9 +192,6 @@ class ModalCobro(ctk.CTkToplevel):
         lbl.pack(side="right")
         return lbl
 
-    def _iniciar_timer(self):
-        self._tick()
-
     def _tick(self):
         if not self.winfo_exists() or self._procesando:
             return
@@ -236,19 +234,15 @@ class ModalCobro(ctk.CTkToplevel):
         imprimir = self._var_imprimir.get()
 
         # ─── INTERCEPCIÓN DE SEGURIDAD DE IMPRESORA ──────────────────────────
-        # Evaluamos el estado del hardware antes de tocar la Base de Datos.
-        # Pasamos 'self' como parent para que la alerta modal se centre sobre este Cobro.
         eleccion = self.printer.verificar_estado_para_proceder(self, impresion_solicitada=imprimir)
         
         if eleccion == "intentar":
-            return  # Abortamos de inmediato. Nada cambia, la ventana sigue lista.
+            return  
         elif eleccion == "continuar":
-            # Bypass manual: El usuario omitirá el ticket para destrabar la cola
             self._var_imprimir.set(False)
             imprimir = False
         # ─────────────────────────────────────────────────────────────────────
 
-        # El flujo seguro continúa aquí si todo está OK o si se seleccionó Bypass Digital:
         self._procesando = True
         self._entry_monto.configure(border_width=0)
         self._lbl_error.configure(text="")
@@ -258,10 +252,14 @@ class ModalCobro(ctk.CTkToplevel):
 
         def _worker():
             try:
-                # Modificamos SQLite de forma segura
-                sesion_cobrada = self.db.cobrar_sesion(sesion["id"], monto)
+                sesion_cobrada = self.db.cobrar_sesion(
+                    sesion["id"], 
+                    monto,
+                    minutos_fijos=self._minutos  
+                )
+                if "hora_salida" not in sesion_cobrada:
+                    raise ValueError("cobrar_sesion falló o no retornó 'hora_salida'. Verifique el módulo DB.")
 
-                # Si el bypass no se activó, mandamos la orden física de impresión
                 if imprimir:
                     datos = self.config.get_datos_negocio()
                     self.printer.imprimir_cobro(
@@ -283,6 +281,8 @@ class ModalCobro(ctk.CTkToplevel):
 
             except Exception as e:
                 def _err():
+                    # Esto asegura de que el reseteo ocurra independientemente
+                    # de si la ventana sigue existiendo o no.
                     self._procesando = False
                     if self.winfo_exists():
                         self._btn_cobrar.configure(state="normal", text="✓  Confirmar Cobro")

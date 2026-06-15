@@ -116,24 +116,27 @@ class ConfigManager:
     def get_tiempo_libre(self) -> int:
         return self.getint("sistema", "tiempo_libre_min", fallback=0)
 
-    def get_tarifa(self, tipo_vehiculo: str) -> float:
-        clave = (
+    def _normalizar_clave(self, tipo_vehiculo: str) -> str:
+        """
+        Pasa el texto a minúsculas, cambia espacios por guiones bajos
+        y reemplaza las tildes estándar de Windows.
+        """
+        return (
             tipo_vehiculo.lower()
             .replace(" ", "_")
-            .replace("o\u0301", "o")
-            .replace("a\u0301", "a")
-            .replace("\u00f3", "o")
-            .replace("\u00e1", "a")
+            .replace("á", "a")
+            .replace("é", "e")
+            .replace("í", "i")
+            .replace("ó", "o")
+            .replace("ú", "u")
         )
+
+    def get_tarifa(self, tipo_vehiculo: str) -> float:
+        clave = self._normalizar_clave(tipo_vehiculo)
         return self.getfloat("tarifas", clave, fallback=2.0)
 
     def set_tarifa(self, tipo_vehiculo: str, precio: float):
-        clave = (
-            tipo_vehiculo.lower()
-            .replace(" ", "_")
-            .replace("\u00f3", "o")
-            .replace("\u00e1", "a")
-        )
+        clave = self._normalizar_clave(tipo_vehiculo)
         self.set("tarifas", clave, f"{precio:.2f}")
 
     def get_all_tarifas(self) -> dict:
