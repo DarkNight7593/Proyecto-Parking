@@ -5,7 +5,7 @@ Funcionalidades:
   • Selección de tipo de vehículo con botones de color por categoría.
   • Registro de placa y entrada (con validación y anti-doble-clic).
   • Barra de búsqueda predictiva en tiempo real por placa (Optimizada en memoria).
-  • Tabla en vivo de vehículos activos con timer cada 30 s.
+  • Tabla en vivo de vehículos activos con timer cada 10 s.
   • Botón 💳 Cobrar: abre ModalCobro para procesar el pago.
   • Botón ✕ Cancelar: elimina el registro en caso de error de placa.
 
@@ -398,16 +398,20 @@ class PanelPrincipal(ctk.CTkFrame):
             width=anchos[2],
         ).grid(row=0, column=2, padx=4)
 
-        # Columna 3: Hora de entrada (solo HH:MM)
+        # ── FIX: Aislar los segundos limpiamente de la hora de entrada ──
         entrada_dt = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
+        entrada_limpia = entrada_dt.replace(second=0, microsecond=0)
+        ahora_limpio = datetime.now().replace(second=0, microsecond=0)
+
+        # Columna 3: Hora de entrada (solo HH:MM)
         ctk.CTkLabel(
             fila, text=entrada_dt.strftime("%H:%M"),
             font=fuente(12), text_color=C["text_2"],
             width=anchos[3],
         ).grid(row=0, column=3, padx=4)
 
-        # Columna 4: Tiempo transcurrido (se actualiza cada 30 s via _loop_timer)
-        minutos = max(0, int((datetime.now() - entrada_dt).total_seconds() / 60))
+        # Columna 4: Tiempo transcurrido exacto sin segundos
+        minutos = max(1, int((ahora_limpio - entrada_limpia).total_seconds() / 60))
         lbl_tiempo = ctk.CTkLabel(
             fila, text=formatear_tiempo(minutos),
             font=fuente(12), text_color=C["yellow"],
@@ -449,10 +453,11 @@ class PanelPrincipal(ctk.CTkFrame):
         ).pack(side="left", padx=(5, 0))
 
         # Guardar refs para que _loop_timer pueda actualizar los valores
-        sesion["_lbl_tiempo"] = lbl_tiempo
-        sesion["_lbl_monto"]  = lbl_monto
-        sesion["_entrada_dt"] = entrada_dt
-        sesion["_tarifa"]     = tarifa
+        sesion["_lbl_tiempo"]     = lbl_tiempo
+        sesion["_lbl_monto"]      = lbl_monto
+        sesion["_entrada_dt"]     = entrada_dt # Se mantiene original por compatibilidad general
+        sesion["_entrada_limpia"] = entrada_limpia # Nueva variable segura sin segundos
+        sesion["_tarifa"]         = tarifa
 
     def _abrir_cobro(self, sesion: Dict):
         """Abre el modal de cobro para la sesión seleccionada."""
@@ -488,39 +493,42 @@ class PanelPrincipal(ctk.CTkFrame):
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo cancelar el registro:\n{e}")
 
-    # ─── Timer en vivo (actualiza tiempo y monto cada 30 s) ──────────────────
+    # ─── Timer en vivo (actualiza tiempo y monto cada 10 s) ──────────────────
 
     def _loop_timer(self):
         """
-        Loop principal del timer. Se ejecuta en el hilo de UI cada 30 segundos.
+        Loop principal del timer. Se ejecuta en el hilo de UI cada 10 segundos.
         Actualiza los labels de tiempo y monto estimado de cada fila activa.
         """
         if not self.winfo_exists():
             return
 
-        ahora  = datetime.now()
+        # ── FIX: Usamos la hora actual sin segundos ──
+        ahora_limpio = datetime.now().replace(second=0, microsecond=0)
         moneda = self.config.get_moneda()
         tl     = self.config.get_tiempo_libre()
 
         for sesion in self._filas_activas:
-            lbl_t  = sesion.get("_lbl_tiempo")
-            lbl_m  = sesion.get("_lbl_monto")
-            ent_dt = sesion.get("_entrada_dt")
-            tarifa = sesion.get("_tarifa", 2.0)
+            lbl_t      = sesion.get("_lbl_tiempo")
+            lbl_m      = sesion.get("_lbl_monto")
+            # Extraemos la hora de entrada sin los segundos
+            ent_limpia = sesion.get("_entrada_limpia")
+            tarifa     = sesion.get("_tarifa", 2.0)
 
-            if not (lbl_t and ent_dt):
+            if not (lbl_t and ent_limpia):
                 continue
 
             try:
-                mins  = max(0, int((ahora - ent_dt).total_seconds() / 60))
+                # ── FIX: max(1) y cálculo exacto igual al ModalCobro ──
+                mins  = max(1, int((ahora_limpio - ent_limpia).total_seconds() / 60))
                 monto = calcular_monto(mins, tarifa, tl)
                 lbl_t.configure(text=formatear_tiempo(mins))
                 lbl_m.configure(text=f"{moneda} {monto:.2f}")
             except Exception:
                 pass
 
-        # Programar siguiente actualización en 30 segundos
-        self.after(30_000, self._loop_timer)
+        # Programar siguiente actualización en 10 segundos
+        self.after(10_000, self._loop_timer)
 
     def refrescar(self):
         """API pública para que otros paneles fuercen un refresco de la tabla."""

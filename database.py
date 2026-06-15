@@ -146,11 +146,11 @@ class Database:
             (placa.upper().strip(),),
         ).fetchone()
         return dict(row) if row else None
-
-    def cobrar_sesion(self, sesion_id: int, monto: float, minutos_fijos: Optional[int] = None) -> Dict:
+    
+    def cobrar_sesion(self, sesion_id: int, monto: float, minutos_fijos: Optional[int] = None, hora_salida_fija: Optional[str] = None) -> Dict:
         """
-        Cierra la sesión registrando hora de salida, duración y monto pagado.
-        Acepta 'minutos_fijos' para sincronizar el ticket con lo que el operador vio en pantalla.
+        Cierra la sesión. Recibe parámetros fijos desde la UI para garantizar 
+        que el ticket, la BD y la pantalla estén matemáticamente sincronizados.
         """
         conn   = self._conn()
         sesion = self.get_sesion_por_id(sesion_id)
@@ -160,9 +160,13 @@ class Database:
         if sesion["estado"] != "activo":
             raise ValueError(f"La sesión {sesion_id} no está activa")
 
-        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # FIX: Usar la "fotografía" de los minutos que vio el cajero
+        # 1. Si el modal nos manda una hora exacta, la usamos. Si no, calculamos.
+        if hora_salida_fija is not None:
+            ahora = hora_salida_fija
+        else:
+            ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+        # 2. Si el modal nos manda minutos exactos, los usamos.
         if minutos_fijos is not None:
             minutos = minutos_fijos
         else:
@@ -170,6 +174,7 @@ class Database:
             salida  = datetime.strptime(ahora, "%Y-%m-%d %H:%M:%S")
             minutos = max(1, int((salida - entrada).total_seconds() / 60))
 
+        # 3. Guardamos en BD los datos matemáticamente perfectos
         conn.execute(
             """UPDATE sesiones
                SET hora_salida=?, minutos_total=?, monto=?, estado='cobrado'

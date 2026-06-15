@@ -51,7 +51,7 @@ class ModalCobro(ctk.CTkToplevel):
         config,
         db,
         printer,
-        on_cobro_exitoso: Optional[Callable[[Dict], None]] = None, # ← CORREGIDO TYPE HINT
+        on_cobro_exitoso: Optional[Callable[[Dict], None]] = None,
     ):
         super().__init__(parent)
         self.sesion           = sesion
@@ -60,8 +60,13 @@ class ModalCobro(ctk.CTkToplevel):
         self.printer          = printer
         self.on_cobro_exitoso = on_cobro_exitoso
 
-        self._entrada    = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
-        self._minutos    = max(1, int((datetime.now() - self._entrada).total_seconds() / 60))
+        # 1. Preparamos la entrada limpia (sin segundos para restar exacto)
+        self._entrada_dt = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
+        self._entrada_limpia = self._entrada_dt.replace(second=0, microsecond=0)
+        
+        # 2. Inicializamos reloj y variables de tiempo congeladas
+        self._actualizar_reloj_interno()
+
         self._tarifa     = config.get_tarifa(sesion["tipo_vehiculo"])
         self._tl         = config.get_tiempo_libre()
         self._monto_base = calcular_monto(self._minutos, self._tarifa, self._tl)
@@ -84,7 +89,15 @@ class ModalCobro(ctk.CTkToplevel):
         self.geometry(f"{self.ANCHO}x{self.ALTO}+{px}+{py}")
 
         self._build_ui()
-        self._tick() # ← LLAMADA DIRECTA, ELIMINADO _iniciar_timer()
+        self._tick()
+
+    def _actualizar_reloj_interno(self):
+        """Congela la hora actual sin segundos y sincroniza los minutos exactos."""
+        ahora = datetime.now().replace(second=0, microsecond=0)
+        self._hora_salida_str = ahora.strftime("%Y-%m-%d %H:%M:%S")
+        # Para visualización en pantalla
+        self._hora_salida_display = ahora.strftime("%d/%m/%Y  %I:%M %p") 
+        self._minutos = max(1, int((ahora - self._entrada_limpia).total_seconds() / 60))
 
     def _build_ui(self):
         # Header coloreado por tipo de vehículo
@@ -116,8 +129,10 @@ class ModalCobro(ctk.CTkToplevel):
         # Tarjeta: Tiempos
         card_tiempo = ctk.CTkFrame(body, fg_color=C["bg_dark"], corner_radius=12)
         card_tiempo.pack(fill="x", padx=24, pady=10)
-        self._fila(card_tiempo, "🕐  Entrada", self._entrada.strftime("%d/%m/%Y  %I:%M %p"))
-        self._fila(card_tiempo, "🕐  Salida (ahora)", datetime.now().strftime("%d/%m/%Y  %I:%M %p"))
+        self._fila(card_tiempo, "🕐  Entrada", self._entrada_dt.strftime("%d/%m/%Y  %I:%M %p"))
+        
+        # Etiqueta de salida que se actualizará con el tick
+        self._lbl_salida = self._fila(card_tiempo, "🕐  Salida", self._hora_salida_display)
 
         self._lbl_tiempo = self._fila(
             card_tiempo, "⏱️  Tiempo total",
@@ -196,13 +211,18 @@ class ModalCobro(ctk.CTkToplevel):
         if not self.winfo_exists() or self._procesando:
             return
         try:
-            minutos = max(1, int((datetime.now() - self._entrada).total_seconds() / 60))
-            self._minutos = minutos
-            self._lbl_tiempo.configure(text=formatear_tiempo(minutos))
+            # Sincronizar reloj cada 30 segundos
+            self._actualizar_reloj_interno()
+            
+            # Actualizar textos en pantalla
+            self._lbl_salida.configure(text=self._hora_salida_display)
+            self._lbl_tiempo.configure(text=formatear_tiempo(self._minutos))
 
             try:
                 monto_actual = float(self._var_monto.get())
-                monto_nuevo  = calcular_monto(minutos, self._tarifa, self._tl)
+                monto_nuevo  = calcular_monto(self._minutos, self._tarifa, self._tl)
+                
+                # Respetar el ajuste manual si lo hubo
                 if abs(monto_actual - self._monto_base) < 0.01:
                     self._monto_base = monto_nuevo
                     self._var_monto.set(f"{monto_nuevo:.2f}")
@@ -221,7 +241,6 @@ class ModalCobro(ctk.CTkToplevel):
         if self._procesando:
             return
 
-        # 1. Validar formato del monto
         try:
             monto = float(self._var_monto.get())
             if monto < 0:
@@ -233,7 +252,6 @@ class ModalCobro(ctk.CTkToplevel):
 
         imprimir = self._var_imprimir.get()
 
-        # ─── INTERCEPCIÓN DE SEGURIDAD DE IMPRESORA ──────────────────────────
         eleccion = self.printer.verificar_estado_para_proceder(self, impresion_solicitada=imprimir)
         
         if eleccion == "intentar":
@@ -241,7 +259,6 @@ class ModalCobro(ctk.CTkToplevel):
         elif eleccion == "continuar":
             self._var_imprimir.set(False)
             imprimir = False
-        # ─────────────────────────────────────────────────────────────────────
 
         self._procesando = True
         self._entry_monto.configure(border_width=0)
@@ -252,11 +269,14 @@ class ModalCobro(ctk.CTkToplevel):
 
         def _worker():
             try:
+                # Enviamos el monto, los minutos y la hora de salida congelada
                 sesion_cobrada = self.db.cobrar_sesion(
                     sesion["id"], 
                     monto,
-                    minutos_fijos=self._minutos  
+                    minutos_fijos=self._minutos,
+                    hora_salida_fija=self._hora_salida_str  
                 )
+                
                 if "hora_salida" not in sesion_cobrada:
                     raise ValueError("cobrar_sesion falló o no retornó 'hora_salida'. Verifique el módulo DB.")
 
@@ -281,8 +301,6 @@ class ModalCobro(ctk.CTkToplevel):
 
             except Exception as e:
                 def _err():
-                    # Esto asegura de que el reseteo ocurra independientemente
-                    # de si la ventana sigue existiendo o no.
                     self._procesando = False
                     if self.winfo_exists():
                         self._btn_cobrar.configure(state="normal", text="✓  Confirmar Cobro")

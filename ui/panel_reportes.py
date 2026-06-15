@@ -22,7 +22,15 @@ Características:
   • Exportación a Excel (.xlsx) con 5 hojas y gráficos.
   • Carga en hilo daemon para no congelar la UI.
 
-Correcciones mantenidas:
+Correcciones v2 (responsive):
+  • BUG FIX CRÍTICO: controles de paginación ◀/▶ ahora siempre visibles.
+    Causa: pag_bar se empaquetaba DESPUÉS de _scroll_hist con expand=True,
+    quedando fuera del área visible del contenedor de altura fija.
+    Solución: pag_bar se empaqueta con side="bottom" ANTES del scroll_hist.
+  • Cuerpo principal envuelto en CTkScrollableFrame para soportar cualquier
+    resolución de pantalla (scroll vertical si el contenido no cabe).
+  • Alturas de centro y hist_card calculadas proporcionalmente a
+    winfo_screenheight(), con mínimos garantizados.
   • Bug badge color: bg oscuro + borde del color del tipo (no hex 8 dígitos).
 """
 import calendar
@@ -130,7 +138,7 @@ class _CalendarioPicker(ctk.CTkToplevel):
             fg_color="transparent", hover_color=C["bg_light"],
             text_color=C["text_1"], font=fuente(13, bold=True),
             anchor="center", corner_radius=6,
-            command=lambda: None,   # solo estético
+            command=lambda: None,
         )
         self._lbl_mes.pack(side="left", expand=True, fill="x", padx=4)
 
@@ -374,10 +382,12 @@ class _AñoPicker(ctk.CTkToplevel):
 class PanelReportes(ctk.CTkFrame):
     """
     Panel de reportes financieros con 4 vistas de período.
-    Ahora con:
-      • Navegación diaria en la vista 'Hoy'.
-      • Selector de fecha/mes/año al clicar la etiqueta central.
-      • Historial paginado (10 por página) para todos los períodos.
+
+    Layout responsivo v2:
+      • Cuerpo principal en CTkScrollableFrame → soporta cualquier resolución.
+      • Alturas de secciones proporcionales a winfo_screenheight().
+      • BUG FIX: pag_bar se empaqueta con side='bottom' ANTES que _scroll_hist,
+        garantizando visibilidad en contenedores de altura fija.
     """
 
     _ANCHS_HIST      = [115, 100, 85, 95, 95, 75, 90]
@@ -402,13 +412,18 @@ class PanelReportes(ctk.CTkFrame):
         self._canvas_mpl: Optional[object] = None
 
         self._build_ui()
-        self._actualizar_nav()   # texto inicial de la barra de navegación
+        self._actualizar_nav()
         self.cargar_datos()
 
     # ─── Construcción de la UI ────────────────────────────────────────────────
 
     def _build_ui(self):
-        # ── Header principal ───────────────────────────────────────────────
+        # Altura de pantalla para cálculos proporcionales
+        # winfo_screenheight() retorna la altura real del monitor, no del widget,
+        # por lo que funciona correctamente antes de que la ventana esté visible.
+        _sh = max(768, self.winfo_screenheight())
+
+        # ── Header principal (fijo, 56 px) ─────────────────────────────────
         hdr = ctk.CTkFrame(self, fg_color=C["sidebar"], height=56, corner_radius=0)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
@@ -441,7 +456,7 @@ class PanelReportes(ctk.CTkFrame):
         self._seg.set("Hoy")
         self._seg.pack(side="right", padx=(0, 8))
 
-        # ── Barra de navegación (siempre visible en todos los períodos) ────
+        # ── Barra de navegación (fija, 46 px) ──────────────────────────────
         self._frame_nav = ctk.CTkFrame(
             self, fg_color=C["bg_medium"], height=46, corner_radius=0)
         self._frame_nav.pack(fill="x")
@@ -458,7 +473,6 @@ class PanelReportes(ctk.CTkFrame):
         )
         self._btn_ant.pack(side="left", padx=4)
 
-        # Botón-etiqueta clicable que abre el selector de fecha/período
         self._lbl_nav = ctk.CTkButton(
             nav_inner, text="",
             width=240, height=30,
@@ -477,14 +491,25 @@ class PanelReportes(ctk.CTkFrame):
         )
         self._btn_sig.pack(side="left", padx=4)
 
-        # Icono de ayuda — indica que la fecha es clicable
         ctk.CTkLabel(
             nav_inner, text="📅",
             font=fuente(13), text_color=C["text_3"],
         ).pack(side="left", padx=(2, 0))
 
+        # ── Cuerpo scrollable ───────────────────────────────────────────────
+        # Al envolver todo el contenido en un CTkScrollableFrame, la UI es
+        # funcional en cualquier resolución: si el contenido no cabe en pantalla,
+        # el usuario puede hacer scroll vertical para acceder a todas las secciones.
+        _body = ctk.CTkScrollableFrame(
+            self,
+            fg_color="transparent",
+            scrollbar_fg_color=C["bg_light"],
+            corner_radius=0,
+        )
+        _body.pack(fill="both", expand=True)
+
         # ── KPI cards ─────────────────────────────────────────────────────
-        self._frame_kpis = ctk.CTkFrame(self, fg_color="transparent")
+        self._frame_kpis = ctk.CTkFrame(_body, fg_color="transparent")
         self._frame_kpis.pack(fill="x", padx=20, pady=(12, 0))
 
         self._kpi_refs: Dict[str, ctk.CTkLabel] = {}
@@ -509,8 +534,14 @@ class PanelReportes(ctk.CTkFrame):
             self._kpi_refs[key] = lbl
 
         # ── Área central: gráfico (izquierda) + breakdown (derecha) ───────
-        centro = ctk.CTkFrame(self, fg_color="transparent")
-        centro.pack(fill="both", expand=True, padx=20, pady=10)
+        # Altura proporcional: 28% de la pantalla, mínimo 220 px.
+        # Al estar en _body con fill="x" (no "both"), se necesita altura fija
+        # para que el gráfico matplotlib tenga espacio garantizado.
+        _centro_h = max(220, int(_sh * 0.28))
+
+        centro = ctk.CTkFrame(_body, fg_color="transparent", height=_centro_h)
+        centro.pack(fill="x", padx=20, pady=10)
+        centro.pack_propagate(False)   # mantiene la altura calculada
 
         self._frame_chart = ctk.CTkFrame(
             centro, fg_color=C["bg_medium"], corner_radius=14)
@@ -543,9 +574,14 @@ class PanelReportes(ctk.CTkFrame):
         self._frame_tipo_rows.pack(fill="both", expand=True, padx=6, pady=(0, 8))
 
         # ── Historial paginado ─────────────────────────────────────────────
-        hist_card = ctk.CTkFrame(self, fg_color=C["bg_medium"], corner_radius=14)
+        # Altura proporcional: 30% de pantalla, mínimo 260 px.
+        # 260 px garantiza espacio para: cabecera (30) + cols (28) +
+        # ~5 filas de 32 px cada una (160) + paginación (36) = 254 px base.
+        _hist_h = max(260, int(_sh * 0.30))
+
+        hist_card = ctk.CTkFrame(_body, fg_color=C["bg_medium"], corner_radius=14)
         hist_card.pack(fill="x", padx=20, pady=(0, 14))
-        hist_card.configure(height=252)
+        hist_card.configure(height=_hist_h)
         hist_card.pack_propagate(False)
 
         # Cabecera del historial
@@ -578,16 +614,20 @@ class PanelReportes(ctk.CTkFrame):
                 width=w, anchor="w",
             ).pack(side="left", padx=(10 if i == 0 else 2, 2))
 
-        # Área scrollable de filas
-        self._scroll_hist = ctk.CTkScrollableFrame(
-            hist_card, fg_color="transparent",
-            scrollbar_fg_color=C["bg_light"], corner_radius=0,
-        )
-        self._scroll_hist.pack(fill="both", expand=True, padx=10)
-
-        # ── Controles de paginación ────────────────────────────────────────
-        pag_bar = ctk.CTkFrame(hist_card, fg_color="transparent", height=34)
-        pag_bar.pack(fill="x", padx=10, pady=(2, 4))
+        # ── ⚠️ FIX CRÍTICO: paginación PRIMERO con side="bottom" ──────────
+        #
+        # PROBLEMA ORIGINAL:
+        #   _scroll_hist se empaquetaba con fill="both", expand=True → consumía
+        #   todo el espacio restante dentro del hist_card (altura fija). El
+        #   pag_bar se añadía después y quedaba fuera del área visible: altura
+        #   efectiva = 0, controles invisibles en cualquier resolución.
+        #
+        # SOLUCIÓN:
+        #   Empaquetar pag_bar con side="bottom" ANTES de _scroll_hist. Tkinter
+        #   reserva el espacio del bottom primero; _scroll_hist recibe solo lo
+        #   que queda, garantizando que la paginación siempre sea visible.
+        pag_bar = ctk.CTkFrame(hist_card, fg_color="transparent", height=36)
+        pag_bar.pack(side="bottom", fill="x", padx=10, pady=(2, 6))
         pag_bar.pack_propagate(False)
 
         self._btn_hist_prev = ctk.CTkButton(
@@ -611,6 +651,15 @@ class PanelReportes(ctk.CTkFrame):
             command=lambda: self._cambiar_pagina_hist(1),
         )
         self._btn_hist_next.pack(side="right", padx=(6, 0))
+
+        # ── Área scrollable de filas (DESPUÉS de paginación) ───────────────
+        # Ahora pack_propagate del hist_card reserva espacio para pag_bar
+        # antes de que _scroll_hist lo solicite con expand=True.
+        self._scroll_hist = ctk.CTkScrollableFrame(
+            hist_card, fg_color="transparent",
+            scrollbar_fg_color=C["bg_light"], corner_radius=0,
+        )
+        self._scroll_hist.pack(fill="both", expand=True, padx=10)
 
     # ─── Control de período ───────────────────────────────────────────────────
 
@@ -902,7 +951,7 @@ class PanelReportes(ctk.CTkFrame):
 
                 self.after(0, _update)
             except Exception:
-                pass   # fallo silencioso en paginación
+                pass
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1226,6 +1275,7 @@ class PanelReportes(ctk.CTkFrame):
         def _on_ok():
             if self.winfo_exists():
                 self._btn_excel.configure(state="normal", text="📊 Exportar Excel")
+                from tkinter import messagebox
                 messagebox.showinfo(
                     "✅ Exportado",
                     f"Reporte guardado correctamente en:\n\n{ruta}",
@@ -1234,6 +1284,7 @@ class PanelReportes(ctk.CTkFrame):
         def _on_err(msg: str):
             if self.winfo_exists():
                 self._btn_excel.configure(state="normal", text="📊 Exportar Excel")
+                from tkinter import messagebox
                 messagebox.showerror(
                     "Error al exportar",
                     f"No se pudo generar el archivo:\n\n{msg}",
