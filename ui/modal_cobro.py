@@ -1,10 +1,11 @@
 """
 ParkingPro - Modal de cobro
 Muestra el resumen de la sesión y confirma el cobro e impresión del ticket.
-Threading: el cobro y la impresión corren en hilo daemon para no congelar la UI.
+Threading (Corregido): el cobro y la impresión corren en hilos de un ThreadPoolExecutor 
+para no congelar la UI, con manejo seguro de cierres y conexiones SQLite.
 """
 import math 
-import threading
+from concurrent.futures import ThreadPoolExecutor
 import customtkinter as ctk
 from datetime import datetime
 from typing import Dict, Callable, Optional
@@ -41,9 +42,6 @@ class ModalCobro(ctk.CTkToplevel):
     Ventana modal para registrar el cobro de una sesión activa.
     """
 
-    ANCHO = 500
-    ALTO  = 600
-
     def __init__(
         self,
         parent,
@@ -60,11 +58,21 @@ class ModalCobro(ctk.CTkToplevel):
         self.printer          = printer
         self.on_cobro_exitoso = on_cobro_exitoso
 
-        # 1. Preparamos la entrada limpia (sin segundos para restar exacto)
-        self._entrada_dt = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
+        self._executor = ThreadPoolExecutor(max_workers=1)
+
+        # 1. Calcular tamaño proporcional a la pantalla actual.
+        #    winfo_screenwidth/height() está disponible en el Toplevel desde el
+        #    primer frame del ciclo de eventos, antes de que la ventana sea visible.
+        _sw = self.winfo_screenwidth()
+        _sh = self.winfo_screenheight()
+        self._modal_w = max(460, min(600, int(_sw * 0.30)))
+        self._modal_h = max(580, min(860, int(_sh * 0.88)))
+
+        # 2. Preparar entrada limpia (sin segundos para restar exacto)
+        self._entrada_dt     = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
         self._entrada_limpia = self._entrada_dt.replace(second=0, microsecond=0)
-        
-        # 2. Inicializamos reloj y variables de tiempo congeladas
+
+        # 3. Inicializar reloj y variables de tiempo congeladas
         self._actualizar_reloj_interno()
 
         self._tarifa     = config.get_tarifa(sesion["tipo_vehiculo"])
@@ -76,20 +84,40 @@ class ModalCobro(ctk.CTkToplevel):
         self._procesando = False
 
         self.title("Cobro de Ticket")
-        self.geometry(f"{self.ANCHO}x{self.ALTO}")
+        self.geometry(f"{self._modal_w}x{self._modal_h}")
         self.resizable(False, False)
         self.configure(fg_color=C["bg_dark"])
         self.grab_set()
         self.lift()
         self.focus_force()
 
+        # Centrar el modal sobre la ventana padre
         self.update_idletasks()
-        px = parent.winfo_x() + (parent.winfo_width()  - self.ANCHO) // 2
-        py = parent.winfo_y() + (parent.winfo_height() - self.ALTO)  // 2
-        self.geometry(f"{self.ANCHO}x{self.ALTO}+{px}+{py}")
+        px = parent.winfo_x() + (parent.winfo_width()  - self._modal_w) // 2
+        py = parent.winfo_y() + (parent.winfo_height() - self._modal_h) // 2
+        self.geometry(f"{self._modal_w}x{self._modal_h}+{max(0, px)}+{max(0, py)}")
+        
+        # Protección crucial contra cierres abruptos
+        self.protocol("WM_DELETE_WINDOW", self._intentar_cerrar)
 
         self._build_ui()
         self._tick()
+    
+    def _intentar_cerrar(self):
+        """Controla el comportamiento cuando el operador presiona la 'X' de la ventana."""
+        if self._procesando:
+            # Si el hilo está guardando datos o imprimiendo, ignoramos el clic en la X
+            # para evitar que la ventana se destruya a mitad del proceso.
+            return
+        
+        # Si NO está procesando, podemos cerrar la ventana normalmente de forma segura
+        self.destroy()
+
+    def destroy(self):
+        """Apaga el hilo en segundo plano antes de destruir la ventana modal."""
+        if hasattr(self, '_executor'):
+            self._executor.shutdown(wait=False)
+        super().destroy()
 
     def _actualizar_reloj_interno(self):
         """Congela la hora actual sin segundos y sincroniza los minutos exactos."""
@@ -208,30 +236,37 @@ class ModalCobro(ctk.CTkToplevel):
         return lbl
 
     def _tick(self):
-        if not self.winfo_exists() or self._procesando:
-            return
-        try:
-            # Sincronizar reloj cada 30 segundos
-            self._actualizar_reloj_interno()
-            
-            # Actualizar textos en pantalla
-            self._lbl_salida.configure(text=self._hora_salida_display)
-            self._lbl_tiempo.configure(text=formatear_tiempo(self._minutos))
+        # 1. Si la ventana ya no existe, aquí sí matamos el ciclo de forma segura.
+        if not self.winfo_exists():
+            return  
 
+        # 2. TODO el bloque de actualización corre SOLO si NO se está procesando un cobro
+        if not self._procesando:
             try:
-                monto_actual = float(self._var_monto.get())
-                monto_nuevo  = calcular_monto(self._minutos, self._tarifa, self._tl)
+                # Sincronizar reloj cada 30 segundos internamente
+                self._actualizar_reloj_interno()
                 
-                # Respetar el ajuste manual si lo hubo
-                if abs(monto_actual - self._monto_base) < 0.01:
-                    self._monto_base = monto_nuevo
-                    self._var_monto.set(f"{monto_nuevo:.2f}")
-            except ValueError:
+                # Actualizar textos en pantalla
+                self._lbl_salida.configure(text=self._hora_salida_display)
+                self._lbl_tiempo.configure(text=formatear_tiempo(self._minutos))
+
+                try:
+                    monto_actual = float(self._var_monto.get())
+                    monto_nuevo  = calcular_monto(self._minutos, self._tarifa, self._tl)
+                    
+                    # Respetar el ajuste manual si lo hubo
+                    if abs(monto_actual - self._monto_base) < 0.01:
+                        self._monto_base = monto_nuevo
+                        self._var_monto.set(f"{monto_nuevo:.2f}")
+                except ValueError:
+                    pass
+            except Exception:
+                # Si algo falla actualizando la pantalla, lo ignoramos para que no se caiga el programa
                 pass
 
-            self.after(30_000, self._tick)
-        except Exception:
-            pass
+        # 3. CRUCIAL: El 'after' queda completamente fuera del 'if' y del 'try' anterior.
+        # Esto garantiza que, pase lo que pase, el reloj se vuelva a agendar a los 30 segundos.
+        self.after(30_000, self._tick)
 
     def _cancelar(self):
         if not self._procesando:
@@ -292,20 +327,29 @@ class ModalCobro(ctk.CTkToplevel):
                     )
 
                 def _ok():
-                    if self.on_cobro_exitoso:
-                        self.on_cobro_exitoso(sesion_cobrada)
-                    if self.winfo_exists():
-                        self.destroy()
+                    try:
+                        if self.on_cobro_exitoso:
+                            self.on_cobro_exitoso(sesion_cobrada)
+                    finally:
+                        if self.winfo_exists():
+                            self.destroy()
 
-                self.after(0, _ok)
+                if self.winfo_exists():
+                    self.after(0, _ok)
 
             except Exception as e:
                 def _err():
                     self._procesando = False
+                    # FIX: Validamos existencia antes de restaurar la UI
                     if self.winfo_exists():
                         self._btn_cobrar.configure(state="normal", text="✓  Confirmar Cobro")
                         self._lbl_error.configure(text=f"⚠ Error: {e}")
 
-                self.after(0, _err)
+                if self.winfo_exists():
+                    self.after(0, _err)
+            finally:
+                # CRUCIAL: No importa si falló o tuvo éxito, el hilo 
+                # limpia su conexión antes de regresar al pool. Evita bloqueos en Windows.
+                self.db.cerrar_conexion_actual()
 
-        threading.Thread(target=_worker, daemon=True).start()
+        self._executor.submit(_worker)

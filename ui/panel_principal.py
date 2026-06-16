@@ -9,11 +9,13 @@ Funcionalidades:
   • Botón 💳 Cobrar: abre ModalCobro para procesar el pago.
   • Botón ✕ Cancelar: elimina el registro en caso de error de placa.
 
-Threading:
-  • El registro de entrada y la carga de activos corren en hilos daemon.
+Threading (Corregido y Asegurado):
+  • El registro de entrada y la carga de activos corren en hilos de un ThreadPoolExecutor.
+  • Se incluyó manejo estricto de try/except/finally para evitar hilos zombis y liberar SQLite.
   • El timer de la tabla se ejecuta en el hilo principal (after loop).
 """
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox
 
 import customtkinter as ctk
@@ -37,7 +39,10 @@ class PanelPrincipal(ctk.CTkFrame):
         self.db      = db
         self.printer = printer
 
-        self._tipo_sel:      Optional[Dict] = None   # tipo de vehículo seleccionado
+        self._executor = ThreadPoolExecutor(max_workers=3)
+        self._cargar_gen = 0
+
+        self._tipo_sel:     Optional[Dict] = None   # tipo de vehículo seleccionado
         self._todos_los_activos: List[Dict] = []     # Caché maestro de activos (para optimizar búsqueda)
         self._filas_activas: List[Dict]     = []     # Lista filtrada/visible en pantalla
         self._tipo_btns:     List[ctk.CTkButton] = [] # botones de tipo de vehículo
@@ -47,6 +52,11 @@ class PanelPrincipal(ctk.CTkFrame):
         self._cargar_activos()
         self._loop_timer()
 
+    def destroy(self):
+        """Se ejecuta al destruir el panel para apagar los hilos limpiamente."""
+        self._executor.shutdown(wait=False)
+        super().destroy()
+
     def set_printer(self, printer):
         """Actualiza la impresora desde configuración (llamado por main.py)."""
         self.printer = printer
@@ -54,6 +64,32 @@ class PanelPrincipal(ctk.CTkFrame):
     # ─── Construcción de la UI ────────────────────────────────────────────────
 
     def _build_ui(self):
+        # ── Métricas de pantalla para layout proporcional ──────────────────
+        # winfo_screenwidth/height() devuelven la resolución real del monitor
+        # y están disponibles antes de que la ventana sea visible.
+        _sw = self.winfo_screenwidth()
+        _sh = self.winfo_screenheight()
+
+        # Misma fórmula que main.py para que sidebar_w coincida exactamente
+        _sidebar_w = max(200, min(270, int(_sw * 0.155)))
+        _avail_w   = _sw - _sidebar_w   # ancho útil real disponible para este panel
+
+        # Botones de tipo de vehículo: 3 columnas, padding lateral ~56 px, gaps 12 px (2×6)
+        _btn_w = max(120, min(220, int((_avail_w - 56 - 24) / 3)))
+        _btn_h = max(64,  min(90,  int(_sh * 0.09)))
+
+        # Columnas de la tabla: escalar para cubrir el ancho disponible.
+        # Los pesos base [120,110,100,90,90,110,140] suman 760 y mantienen proporciones.
+        # Se descuentan ~40 px de padding/scrollbar del frame de tabla.
+        _base_cols  = [120, 110, 100, 90, 90, 110, 140]
+        _net_w      = max(sum(_base_cols), _avail_w - 40)
+        _scale      = _net_w / sum(_base_cols)
+        _min_cols   = [80, 80, 70, 70, 70, 90, 100]
+        self._col_anchos_dyn = [
+            max(mn, int(a * _scale)) for a, mn in zip(_base_cols, _min_cols)
+        ]
+        # ──────────────────────────────────────────────────────────────────
+
         # ── Cabecera del panel ─────────────────────────────────────────────
         hdr = ctk.CTkFrame(self, fg_color=C["sidebar"], height=56, corner_radius=0)
         hdr.pack(fill="x")
@@ -86,7 +122,7 @@ class PanelPrincipal(ctk.CTkFrame):
                 hover_color=tipo["color"],
                 text_color=C["text_2"],
                 border_color=C["border"], border_width=1,
-                width=148, height=74, corner_radius=14,
+                width=_btn_w, height=_btn_h, corner_radius=14,
                 command=lambda t=tipo: self._seleccionar_tipo(t),
             )
             btn.grid(row=fila, column=col, padx=6, pady=6)
@@ -140,7 +176,7 @@ class PanelPrincipal(ctk.CTkFrame):
         frame_tabla = ctk.CTkFrame(self, fg_color=C["bg_dark"], corner_radius=0)
         frame_tabla.pack(fill="both", expand=True)
 
-        # ── BARRA DE BÚSQUEDA (Nueva sección optimizada) ───────────────────
+        # ── BARRA DE BÚSQUEDA (Optimizada) ───────────────────
         frame_busqueda = ctk.CTkFrame(frame_tabla, fg_color="transparent")
         frame_busqueda.pack(fill="x", padx=24, pady=(12, 8))
 
@@ -166,7 +202,7 @@ class PanelPrincipal(ctk.CTkFrame):
         hdr_tabla.pack(fill="x")
         hdr_tabla.pack_propagate(False)
 
-        for i, (col_nombre, w) in enumerate(zip(self.COLS_TABLA, self.COL_ANCHOS)):
+        for i, (col_nombre, w) in enumerate(zip(self.COLS_TABLA, self._col_anchos_dyn)):
             ctk.CTkLabel(
                 hdr_tabla, text=col_nombre,
                 font=fuente(11, bold=True), text_color=C["text_3"],
@@ -218,7 +254,7 @@ class PanelPrincipal(ctk.CTkFrame):
 
     def _registrar_entrada(self):
         """
-        Valida los datos y registra la entrada en un hilo daemon.
+        Valida los datos y registra la entrada en un hilo del pool.
         Bloquea el botón durante el proceso para evitar registros dobles.
         """
         if self._registrando:
@@ -235,16 +271,14 @@ class PanelPrincipal(ctk.CTkFrame):
             self._entry_placa.configure(border_color=C["yellow"])
             return
         
-        # ─── NUEVA SEGURIDAD CENTRALIZADA DE IMPRESORA ───────────────────────
+        # Security check centralizado de la ticketera
         imprimir_entrada = self.config.getbool("impresora", "activa", fallback=True)
-        
         eleccion = self.printer.verificar_estado_para_proceder(self, impresion_solicitada=imprimir_entrada)
         
         if eleccion == "intentar":
             return  # Aborta el registro para que arreglen la ticketera. No entra en SQLite.
         elif eleccion == "continuar":
             imprimir_entrada = False  # El cajero bypassó el error para entrar sin ticket físico
-        # ─────────────────────────────────────────────────────────────────────
 
         self._registrando = True
         self._btn_registrar.configure(state="disabled", text="⏳  Registrando...")
@@ -265,17 +299,29 @@ class PanelPrincipal(ctk.CTkFrame):
                         telefono=datos["telefono"]
                     )
                 
-                self.after(0, lambda: self._post_registro_ok(placa))
-            except ValueError as e:
-                # Error de negocio (placa duplicada, etc.)
-                self.after(0, lambda: self._post_registro_error(str(e), C["yellow"]))
-            except Exception as e:
-                self.after(0, lambda: self._post_registro_error(f"Error: {e}", C["red"]))
+                # CORRECCIÓN: Validamos winfo_exists() ANTES de planificar el after para evitar TclError
+                if self.winfo_exists():
+                    self.after(0, lambda: self._post_registro_ok(placa))
 
-        threading.Thread(target=_worker, daemon=True).start()
+            except ValueError as e:
+                # CORRECCIÓN: Restablece de forma segura el control de errores si ocurre una excepción de negocio
+                if self.winfo_exists():
+                    self.after(0, lambda: self._post_registro_error(str(e), C["yellow"]))
+            except Exception as e:
+                # CORRECCIÓN: Evita el estado congelado (zombi) del botón ante un error crítico imprevisto
+                if self.winfo_exists():
+                    self.after(0, lambda: self._post_registro_error(f"Error: {e}", C["red"]))
+            finally:
+                # CORRECCIÓN CRUCIAL: Limpia siempre la conexión de SQLite asignada al hilo secundario del pool
+                self.db.cerrar_conexion_actual()
+
+        self._executor.submit(_worker)
 
     def _post_registro_ok(self, placa: str):
         """Limpia el formulario y recarga la tabla tras un registro exitoso."""
+        if not self.winfo_exists(): 
+            return
+
         self._mostrar_msg(f"✓ {placa} registrado", C["green"])
         self._entry_placa.delete(0, "end")
         self._entry_placa.configure(border_color=C["border"])
@@ -285,43 +331,60 @@ class PanelPrincipal(ctk.CTkFrame):
 
     def _post_registro_error(self, msg: str, color: str):
         """Muestra el error y restaura el formulario."""
+        if not self.winfo_exists(): 
+            return
+
         self._mostrar_msg(f"⚠ {msg}", color)
         self._btn_registrar.configure(state="normal", text="➕  Registrar Entrada")
         self._registrando = False
 
     def _mostrar_msg(self, texto: str, color: str = "white"):
         """Muestra un mensaje temporal (desaparece en 4 segundos)."""
+        if not self.winfo_exists():
+            return
         self._lbl_msg.configure(text=texto, text_color=color)
-        self.after(4_000, lambda: self._lbl_msg.configure(text=""))
+        self.after(4_000, lambda: self._limpiar_msg_seguro())
+
+    def _limpiar_msg_seguro(self):
+        """Limpia de forma segura el label de estado validando la existencia del widget."""
+        if self.winfo_exists():
+            self._lbl_msg.configure(text="")
 
     # ─── Tabla de vehículos activos y Filtrado ────────────────────────────────
 
     def _cargar_activos(self):
-        """Carga la lista de sesiones activas desde la BD en un hilo daemon."""
+        self._cargar_gen += 1
+        gen = self._cargar_gen          # captura la generación actual
         def _worker():
             try:
                 activos = self.db.get_sesiones_activas()
-                # Redirigir al manejador maestro de datos
-                self.after(0, lambda: self._post_cargar_activos(activos))
+                if self.winfo_exists() and self._cargar_gen == gen:  # ← solo postea si sigue siendo el más nuevo
+                    self.after(0, lambda: self._post_cargar_activos(activos))
             except Exception:
-                pass  # Error silencioso; la tabla simplemente no se actualiza
-
-        threading.Thread(target=_worker, daemon=True).start()
+                pass
+            finally:
+                self.db.cerrar_conexion_actual()
+        self._executor.submit(_worker)
 
     def _post_cargar_activos(self, activos: List[Dict]):
         """Almacena la lista completa en memoria y procesa el filtro actual."""
+        if not self.winfo_exists(): 
+            return
+
         self._todos_los_activos = activos
         self._aplicar_filtro()
 
     def _aplicar_filtro(self):
         """Filtra la lista de vehículos en memoria según lo escrito por el usuario."""
+        if not self.winfo_exists():
+            return
+
         busqueda = self._entry_buscar.get().strip().upper()
 
         if not busqueda:
-            # Si se eliminó todo, renderiza la lista original intacta
             self._render_activos(self._todos_los_activos)
         else:
-            # Filtrado ultra-veloz en memoria (aquellos que EMPIEZAN con la búsqueda)
+            # Filtrado rápido en memoria (aquellos que EMPIEZAN con los caracteres ingresados)
             filtrados = [
                 sesion for sesion in self._todos_los_activos
                 if sesion["placa"].upper().startswith(busqueda)
@@ -329,10 +392,7 @@ class PanelPrincipal(ctk.CTkFrame):
             self._render_activos(filtrados)
 
     def _render_activos(self, activos: List[Dict]):
-        """
-        Renderiza la tabla de activos en el hilo principal.
-        Destruye todos los widgets previos y los recrea frescos.
-        """
+        """Renderiza la tabla de activos en el hilo principal destruyendo previos widgets."""
         if not self.winfo_exists():
             return
 
@@ -343,7 +403,6 @@ class PanelPrincipal(ctk.CTkFrame):
             w.destroy()
 
         if not activos:
-            # Estado vacío: mensaje centrado (sirve también si la búsqueda no arroja resultados)
             ctk.CTkLabel(
                 self._scroll,
                 text="Sin vehículos activos  🅿",
@@ -355,22 +414,18 @@ class PanelPrincipal(ctk.CTkFrame):
             self._crear_fila(idx, sesion)
 
     def _crear_fila(self, idx: int, sesion: Dict):
-        """
-        Crea una fila en la tabla para una sesión activa.
-        Cada fila contiene: ticket, tipo, placa, hora, tiempo, monto y acciones.
-        Las referencias a los labels de tiempo/monto se guardan en el dict
-        de la sesión para ser actualizados por el timer.
-        """
+        """Crea una fila gráfica en la tabla para una sesión activa."""
+        if not self.winfo_exists():
+            return
+
         color_veh = color_tipo(sesion["tipo_vehiculo"])
-        # Alternar fondo para legibilidad
         bg_fila = C["bg_medium"] if idx % 2 == 0 else C["bg_dark"]
 
-        fila = ctk.CTkFrame(
-            self._scroll, fg_color=bg_fila, height=50, corner_radius=8)
+        fila = ctk.CTkFrame(self._scroll, fg_color=bg_fila, height=50, corner_radius=8)
         fila.pack(fill="x", padx=4, pady=2)
         fila.pack_propagate(False)
 
-        anchos = self.COL_ANCHOS
+        anchos = self._col_anchos_dyn   # anchos proporcionales calculados en _build_ui
 
         # Columna 0: Número de ticket
         ctk.CTkLabel(
@@ -379,38 +434,36 @@ class PanelPrincipal(ctk.CTkFrame):
             width=anchos[0], anchor="w",
         ).grid(row=0, column=0, padx=(16, 4))
 
-        # Columna 1: Badge de tipo (fondo coloreado)
-        badge = ctk.CTkFrame(
-            fila, fg_color=color_veh, corner_radius=6, width=96, height=28)
+        # Columna 1: Badge de tipo
+        badge = ctk.CTkFrame(fila, fg_color=color_veh, corner_radius=6, width=96, height=28)
         badge.grid(row=0, column=1, padx=4)
         badge.grid_propagate(False)
         emj = emoji_tipo(sesion["tipo_vehiculo"])
         ctk.CTkLabel(
-            badge,
-            text=f"{emj} {sesion['tipo_vehiculo'][:6]}",
+            badge, text=f"{emj} {sesion['tipo_vehiculo'][:6]}",
             font=fuente(11, bold=True), text_color="white",
         ).place(relx=0.5, rely=0.5, anchor="center")
 
-        # Columna 2: Placa en negrita
+        # Columna 2: Placa
         ctk.CTkLabel(
             fila, text=sesion["placa"],
             font=fuente(13, bold=True), text_color=C["text_1"],
             width=anchos[2],
         ).grid(row=0, column=2, padx=4)
 
-        # ── FIX: Aislar los segundos limpiamente de la hora de entrada ──
+        # Procesar tiempos sin incluir segundos
         entrada_dt = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
         entrada_limpia = entrada_dt.replace(second=0, microsecond=0)
         ahora_limpio = datetime.now().replace(second=0, microsecond=0)
 
-        # Columna 3: Hora de entrada (solo HH:MM)
+        # Columna 3: Hora de entrada (HH:MM)
         ctk.CTkLabel(
             fila, text=entrada_dt.strftime("%H:%M"),
             font=fuente(12), text_color=C["text_2"],
             width=anchos[3],
         ).grid(row=0, column=3, padx=4)
 
-        # Columna 4: Tiempo transcurrido exacto sin segundos
+        # Columna 4: Tiempo transcurrido
         minutos = max(1, int((ahora_limpio - entrada_limpia).total_seconds() / 60))
         lbl_tiempo = ctk.CTkLabel(
             fila, text=formatear_tiempo(minutos),
@@ -419,12 +472,11 @@ class PanelPrincipal(ctk.CTkFrame):
         )
         lbl_tiempo.grid(row=0, column=4, padx=4)
 
-        # Columna 5: Monto estimado (se actualiza con el timer)
+        # Columna 5: Monto estimado
         tarifa = self.config.get_tarifa(sesion["tipo_vehiculo"])
         monto  = calcular_monto(minutos, tarifa, self.config.get_tiempo_libre())
         lbl_monto = ctk.CTkLabel(
-            fila,
-            text=f"{self.config.get_moneda()} {monto:.2f}",
+            fila, text=f"{self.config.get_moneda()} {monto:.2f}",
             font=fuente(12, bold=True), text_color=C["green"],
             width=anchos[5],
         )
@@ -434,7 +486,6 @@ class PanelPrincipal(ctk.CTkFrame):
         frame_btns = ctk.CTkFrame(fila, fg_color="transparent")
         frame_btns.grid(row=0, column=6, padx=(4, 10))
 
-        # Botón Cobrar: abre el modal de cobro
         ctk.CTkButton(
             frame_btns, text="💳 Cobrar",
             fg_color=C["blue"], hover_color=C["blue_h"],
@@ -443,7 +494,6 @@ class PanelPrincipal(ctk.CTkFrame):
             command=lambda s=sesion: self._abrir_cobro(s),
         ).pack(side="left")
 
-        # Botón Cancelar (✕): elimina el registro por error
         ctk.CTkButton(
             frame_btns, text="✕",
             fg_color="#4a1010", hover_color=C["red"],
@@ -452,15 +502,17 @@ class PanelPrincipal(ctk.CTkFrame):
             command=lambda s=sesion: self._cancelar_sesion(s),
         ).pack(side="left", padx=(5, 0))
 
-        # Guardar refs para que _loop_timer pueda actualizar los valores
+        # Guardar metadatos para el loop del timer en UI
         sesion["_lbl_tiempo"]     = lbl_tiempo
         sesion["_lbl_monto"]      = lbl_monto
-        sesion["_entrada_dt"]     = entrada_dt # Se mantiene original por compatibilidad general
-        sesion["_entrada_limpia"] = entrada_limpia # Nueva variable segura sin segundos
+        sesion["_entrada_dt"]     = entrada_dt
+        sesion["_entrada_limpia"] = entrada_limpia
         sesion["_tarifa"]         = tarifa
 
     def _abrir_cobro(self, sesion: Dict):
         """Abre el modal de cobro para la sesión seleccionada."""
+        if not self.winfo_exists():
+            return
         ModalCobro(
             self.winfo_toplevel(),
             sesion, self.config, self.db, self.printer,
@@ -468,10 +520,10 @@ class PanelPrincipal(ctk.CTkFrame):
         )
 
     def _cancelar_sesion(self, sesion: Dict):
-        """
-        Cancela (elimina) un registro activo tras confirmación del usuario.
-        La sesión queda con estado='cancelado' en la BD para auditoría.
-        """
+        """Cancela un registro activo tras confirmación explícita."""
+        if not self.winfo_exists():
+            return
+
         placa  = sesion.get("placa", "")
         ticket = sesion.get("ticket_numero", "")
 
@@ -480,7 +532,7 @@ class PanelPrincipal(ctk.CTkFrame):
             f"¿Eliminar el registro de la placa  {placa}?\n"
             f"Ticket: {ticket}\n\n"
             f"No se registrará el cobro del ticket\n\n"
-            "¿Confirmas la cancelación?",
+            f"¿Confirmas la cancelación?",
         )
 
         if not confirmado:
@@ -492,18 +544,17 @@ class PanelPrincipal(ctk.CTkFrame):
             self._mostrar_msg(f"✓ Registro {ticket} cancelado", C["yellow"])
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo cancelar el registro:\n{e}")
+        finally:
+            # CORRECCIÓN: Libera la conexión tras ejecutar la query en el hilo principal de UI
+            self.db.cerrar_conexion_actual()
 
     # ─── Timer en vivo (actualiza tiempo y monto cada 10 s) ──────────────────
 
     def _loop_timer(self):
-        """
-        Loop principal del timer. Se ejecuta en el hilo de UI cada 10 segundos.
-        Actualiza los labels de tiempo y monto estimado de cada fila activa.
-        """
+        """Loop principal del timer. Se ejecuta en el hilo de UI cada 10 segundos."""
         if not self.winfo_exists():
             return
 
-        # ── FIX: Usamos la hora actual sin segundos ──
         ahora_limpio = datetime.now().replace(second=0, microsecond=0)
         moneda = self.config.get_moneda()
         tl     = self.config.get_tiempo_libre()
@@ -511,7 +562,6 @@ class PanelPrincipal(ctk.CTkFrame):
         for sesion in self._filas_activas:
             lbl_t      = sesion.get("_lbl_tiempo")
             lbl_m      = sesion.get("_lbl_monto")
-            # Extraemos la hora de entrada sin los segundos
             ent_limpia = sesion.get("_entrada_limpia")
             tarifa     = sesion.get("_tarifa", 2.0)
 
@@ -519,17 +569,19 @@ class PanelPrincipal(ctk.CTkFrame):
                 continue
 
             try:
-                # ── FIX: max(1) y cálculo exacto igual al ModalCobro ──
-                mins  = max(1, int((ahora_limpio - ent_limpia).total_seconds() / 60))
-                monto = calcular_monto(mins, tarifa, tl)
-                lbl_t.configure(text=formatear_tiempo(mins))
-                lbl_m.configure(text=f"{moneda} {monto:.2f}")
+                # Los cálculos se ejecutan sobre widgets validados y existentes
+                if lbl_t.winfo_exists() and lbl_m.winfo_exists():
+                    mins  = max(1, int((ahora_limpio - ent_limpia).total_seconds() / 60))
+                    monto = calcular_monto(mins, tarifa, tl)
+                    lbl_t.configure(text=formatear_tiempo(mins))
+                    lbl_m.configure(text=f"{moneda} {monto:.2f}")
             except Exception:
                 pass
 
-        # Programar siguiente actualización en 10 segundos
+        # Programar siguiente actualización recursiva en 10 segundos
         self.after(10_000, self._loop_timer)
 
     def refrescar(self):
         """API pública para que otros paneles fuercen un refresco de la tabla."""
-        self._cargar_activos()
+        if self.winfo_exists():
+            self._cargar_activos()

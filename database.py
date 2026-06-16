@@ -38,7 +38,19 @@ class Database:
             self._local.conn.execute("PRAGMA journal_mode=WAL")
             self._local.conn.execute("PRAGMA foreign_keys=ON")
         return self._local.conn
-
+    
+    def cerrar_conexion_actual(self):
+        """
+        Cierra limpiamente la conexión SQLite asociada al hilo actual.
+        Evita bloqueos de archivos WAL/SHM en Windows.
+        """
+        if hasattr(self._local, "conn"):
+            try:
+                self._local.conn.close()
+            except Exception:
+                pass
+            # Borramos el atributo para que el bolsillo quede vacío
+            delattr(self._local, "conn")
     # ─── Inicialización ───────────────────────────────────────────────────────
 
     def inicializar(self):

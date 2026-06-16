@@ -20,7 +20,7 @@ Características:
       – Todos los períodos muestran TODAS las transacciones del rango.
       – Controles Anterior / Siguiente con "Página X de Y · Z en total".
   • Exportación a Excel (.xlsx) con 5 hojas y gráficos.
-  • Carga en hilo daemon para no congelar la UI.
+  • Carga en hilo mediante ThreadPoolExecutor para no congelar la UI.
 
 Correcciones v2 (responsive):
   • BUG FIX CRÍTICO: controles de paginación ◀/▶ ahora siempre visibles.
@@ -32,9 +32,26 @@ Correcciones v2 (responsive):
   • Alturas de centro y hist_card calculadas proporcionalmente a
     winfo_screenheight(), con mínimos garantizados.
   • Bug badge color: bg oscuro + borde del color del tipo (no hex 8 dígitos).
+
+Correcciones v3 (threading y estabilidad):
+  • BUG FIX CRÍTICO: conexiones SQLite zombis eliminadas.
+    Cada _worker ahora cierra su conexión thread-local en el bloque finally,
+    evitando que los archivos .db-wal queden bloqueados en Windows.
+  • BUG FIX: TclError silencioso en el except de cargar_datos corregido.
+    El callback de error ahora verifica winfo_exists() antes de tocar widgets,
+    igual que ya hacía _exportar_excel con _on_ok/_on_err.
+  • MEJORA: threading.Thread(...).start() reemplazado por ThreadPoolExecutor
+    (max_workers=2) para estandarizar con PanelPrincipal, limitar la cantidad
+    de hilos simultáneos y encolar tareas en lugar de saturar CPU + SQLite.
+  • MEJORA: método destroy() añadido para apagar el executor correctamente
+    al cerrar el panel, evitando hilos huérfanos al cambiar de vista.
+  • MEJORA: except silencioso (pass) en _cargar_pagina_historial mejorado;
+    ahora intenta mostrar el error en la etiqueta de paginación si el widget
+    aún existe, en lugar de descartarlo sin trazabilidad.
 """
 import calendar
-import threading
+import threading                                    # solo se usa en los popups (grab_set, etc.)
+from concurrent.futures import ThreadPoolExecutor  # reemplaza threading.Thread directo
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -390,7 +407,9 @@ class PanelReportes(ctk.CTkFrame):
         garantizando visibilidad en contenedores de altura fija.
     """
 
-    _ANCHS_HIST      = [115, 100, 85, 95, 95, 75, 90]
+    # Anchos BASE del historial (se escalan en _build_ui según la pantalla real).
+    # Se mantienen aquí como referencia de proporciones; el valor activo es self._anchs_hist.
+    _ANCHS_HIST_BASE = [115, 100, 85, 95, 95, 75, 90]
     _HIST_POR_PAGINA = 10
 
     def __init__(self, parent, config, db, printer, **kwargs):
@@ -411,17 +430,57 @@ class PanelReportes(ctk.CTkFrame):
 
         self._canvas_mpl: Optional[object] = None
 
+        # ── Executor de hilos ──────────────────────────────────────────────
+        # max_workers=2: un hilo para carga de datos + uno para paginación.
+        # Si ambos están ocupados con solicitudes obsoletas, las nuevas se
+        # encolan en lugar de crear hilos ilimitados en el SO.
+        # El executor se apaga limpiamente en destroy().
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="PanelReportes")
+
         self._build_ui()
         self._actualizar_nav()
         self.cargar_datos()
 
+    # ─── Ciclo de vida ────────────────────────────────────────────────────────
+
+    def destroy(self):
+        """
+        Apaga el ThreadPoolExecutor antes de destruir el widget.
+
+        wait=False evita bloquear el hilo principal de Tkinter mientras los
+        workers activos terminan; los hilos se marcan como daemon, por lo que
+        el proceso puede salir sin esperar a que acaben.
+        Sin este método, el executor mantendría hilos vivos después de cambiar
+        de panel, y cualquier after() pendiente intentaría actualizar widgets
+        ya destruidos, lanzando TclError.
+        """
+        self._executor.shutdown(wait=False)
+        super().destroy()
+
     # ─── Construcción de la UI ────────────────────────────────────────────────
 
     def _build_ui(self):
-        # Altura de pantalla para cálculos proporcionales
-        # winfo_screenheight() retorna la altura real del monitor, no del widget,
-        # por lo que funciona correctamente antes de que la ventana esté visible.
+        # ── Métricas de pantalla para layout proporcional ──────────────────
+        # Misma lógica que main.py y panel_principal.py para consistencia.
         _sh = max(768, self.winfo_screenheight())
+        _sw = max(1100, self.winfo_screenwidth())
+
+        _sidebar_w = max(200, min(270, int(_sw * 0.155)))
+        _avail_w   = _sw - _sidebar_w   # ancho real disponible para este panel
+
+        # Panel lateral "Por tipo de vehículo": 22% del ancho disponible
+        _tipo_w = max(220, min(340, int(_avail_w * 0.22)))
+
+        # Columnas del historial: escalar para llenar el ancho disponible.
+        # Los pesos base suman 655; se descuentan ~40 px de padding/scrollbar.
+        _base_hist  = self._ANCHS_HIST_BASE
+        _net_hist_w = max(sum(_base_hist), _avail_w - 40)
+        _hist_scale = _net_hist_w / sum(_base_hist)
+        _min_hist   = [70, 70, 60, 65, 65, 55, 65]
+        self._anchs_hist = [
+            max(mn, int(a * _hist_scale)) for a, mn in zip(_base_hist, _min_hist)
+        ]
+        # ──────────────────────────────────────────────────────────────────
 
         # ── Header principal (fijo, 56 px) ─────────────────────────────────
         hdr = ctk.CTkFrame(self, fg_color=C["sidebar"], height=56, corner_radius=0)
@@ -558,7 +617,7 @@ class PanelReportes(ctk.CTkFrame):
         self._frame_chart_inner.pack(fill="both", expand=True, padx=8, pady=8)
 
         self._frame_tipo = ctk.CTkFrame(
-            centro, fg_color=C["bg_medium"], corner_radius=14, width=270)
+            centro, fg_color=C["bg_medium"], corner_radius=14, width=_tipo_w)   # proporcional al ancho disponible
         self._frame_tipo.pack(side="right", fill="y")
         self._frame_tipo.pack_propagate(False)
 
@@ -607,7 +666,7 @@ class PanelReportes(ctk.CTkFrame):
             hist_card, fg_color=C["bg_dark"], height=28, corner_radius=0)
         hdr_hist.pack(fill="x", padx=10, pady=(6, 0))
         hdr_hist.pack_propagate(False)
-        for i, (col, w) in enumerate(zip(cols_hist, self._ANCHS_HIST)):
+        for i, (col, w) in enumerate(zip(cols_hist, self._anchs_hist)):
             ctk.CTkLabel(
                 hdr_hist, text=col,
                 font=fuente(10, bold=True), text_color=C["text_3"],
@@ -803,8 +862,20 @@ class PanelReportes(ctk.CTkFrame):
 
     def cargar_datos(self):
         """
-        Recarga todo el panel.
-        Corre en hilo daemon; actualiza la UI en el hilo principal.
+        Recarga todo el panel para el período y fecha actualmente seleccionados.
+
+        Ejecuta las consultas en el ThreadPoolExecutor (hilo de fondo) para no
+        bloquear la UI. Solo la solicitud más reciente actualiza los widgets
+        (guard de _request_id); las anteriores se descartan antes de tocar Tkinter.
+
+        Garantías de seguridad:
+          • _request_id: evita que datos obsoletos pisen a los nuevos si el
+            usuario cambia de fecha/período muy rápido.
+          • finally: cierra la conexión SQLite del hilo worker antes de que
+            muera, evitando conexiones zombis que bloquen el archivo .db-wal.
+          • winfo_exists(): el callback de error verifica que el widget aún
+            exista antes de intentar actualizar el texto, evitando TclError si
+            el panel fue destruido mientras la consulta estaba en vuelo.
         """
         self._request_id += 1
         rid = self._request_id
@@ -835,6 +906,7 @@ class PanelReportes(ctk.CTkFrame):
                     chart_tipo = "mes"
 
                 def _update():
+                    # Descartar si ya llegó una solicitud más nueva
                     if rid != self._request_id:
                         return
                     self._actualizar_ui(
@@ -843,12 +915,29 @@ class PanelReportes(ctk.CTkFrame):
                     )
 
                 self.after(0, _update)
-            except Exception as e:
-                self.after(0, lambda: self._kpi_refs["ingresos"].configure(
-                    text=f"⚠ Error: {e}"
-                ))
 
-        threading.Thread(target=_worker, daemon=True).start()
+            except Exception as e:
+                # BUG FIX: antes se usaba un lambda directo sin verificar
+                # winfo_exists(), lo que lanzaba TclError si el panel había sido
+                # destruido o el usuario había cambiado de sección mientras la
+                # consulta estaba en vuelo.
+                err_msg = str(e)
+
+                def _mostrar_err():
+                    if self.winfo_exists() and "ingresos" in self._kpi_refs:
+                        self._kpi_refs["ingresos"].configure(text=f"⚠ Error: {err_msg}")
+
+                self.after(0, _mostrar_err)
+
+            finally:
+                # BUG FIX CRÍTICO: cerrar la conexión SQLite del hilo actual.
+                # Cada worker abre una conexión nueva vía threading.local.
+                # Sin este bloque, las conexiones quedan abiertas hasta que el
+                # recolector de basura las limpie (indeterminado), dejando el
+                # archivo .db-wal bloqueado en Windows.
+                self.db.cerrar_conexion_actual()
+
+        self._executor.submit(_worker)
 
     def _actualizar_ui(self, resumen: Dict, tipos: List[Dict],
                         historial: List[Dict], hist_total: int,
@@ -931,7 +1020,19 @@ class PanelReportes(ctk.CTkFrame):
             self._cargar_pagina_historial()
 
     def _cargar_pagina_historial(self):
-        """Carga solo la página del historial sin recargar todo el panel."""
+        """
+        Carga solo la página activa del historial sin recargar todo el panel.
+
+        Se usa al presionar ◀ Anterior / Siguiente ▶. Incrementa _request_id
+        para cancelar visualmente cualquier carga completa en vuelo (cargar_datos),
+        evitando que datos de otra fecha sobreescriban la página actual.
+
+        Garantías de seguridad:
+          • _request_id: descarta resultados de solicitudes obsoletas.
+          • finally: cierra la conexión SQLite del hilo worker.
+          • except: muestra el error en la etiqueta de paginación en lugar de
+            descartarlo silenciosamente con 'pass', facilitando la depuración.
+        """
         self._request_id += 1
         rid    = self._request_id
         fi, ff = self._get_rango()
@@ -944,16 +1045,31 @@ class PanelReportes(ctk.CTkFrame):
                 historial = self.db.get_historial_rango(fi, ff, limit=ppag, offset=offset)
 
                 def _update():
+                    # Descartar si llegó una solicitud más nueva mientras consultábamos
                     if rid != self._request_id:
                         return
                     self._renderizar_historial(historial, moneda)
                     self._actualizar_paginacion_hist()
 
                 self.after(0, _update)
-            except Exception:
-                pass
 
-        threading.Thread(target=_worker, daemon=True).start()
+            except Exception as e:
+                # BUG FIX: antes era 'except Exception: pass', descartando el
+                # error sin ninguna trazabilidad. Ahora mostramos el mensaje en
+                # la etiqueta de paginación si el widget aún existe.
+                err_msg = str(e)
+
+                def _mostrar_err_pag():
+                    if self.winfo_exists():
+                        self._lbl_hist_pag.configure(text=f"⚠ Error al cargar: {err_msg}")
+
+                self.after(0, _mostrar_err_pag)
+
+            finally:
+                # BUG FIX CRÍTICO: cerrar la conexión SQLite thread-local del worker.
+                self.db.cerrar_conexion_actual()
+
+        self._executor.submit(_worker)
 
     # ─── Gráfico de barras ────────────────────────────────────────────────────
 
@@ -1152,7 +1268,7 @@ class PanelReportes(ctk.CTkFrame):
             ).pack(pady=10)
             return
 
-        anchs = self._ANCHS_HIST
+        anchs = self._anchs_hist   # anchos proporcionales calculados en _build_ui
 
         for idx, ses in enumerate(historial):
             estado    = ses.get("estado", "cobrado")
@@ -1267,10 +1383,17 @@ class PanelReportes(ctk.CTkFrame):
 
         def _worker():
             try:
+                # ExcelExporter consulta la BD vía self.db; abre una conexión
+                # thread-local en este hilo que debemos cerrar en finally.
                 ExcelExporter(self.db, self.config).exportar(ruta)
                 self.after(0, _on_ok)
             except Exception as e:
                 self.after(0, lambda: _on_err(str(e)))
+            finally:
+                # BUG FIX CRÍTICO: cerrar la conexión SQLite abierta por ExcelExporter
+                # a través de self.db. Sin esto, el archivo .xlsx puede quedar
+                # bloqueado en Windows hasta que el GC libere la conexión.
+                self.db.cerrar_conexion_actual()
 
         def _on_ok():
             if self.winfo_exists():
@@ -1290,7 +1413,11 @@ class PanelReportes(ctk.CTkFrame):
                     f"No se pudo generar el archivo:\n\n{msg}",
                 )
 
-        threading.Thread(target=_worker, daemon=True).start()
+        # Usar el executor en lugar de lanzar un hilo crudo al SO.
+        # El botón ya está deshabilitado, así que aunque el executor esté ocupado
+        # con una carga de datos, la tarea de exportación se encola de forma
+        # ordenada y no duplicamos hilos.
+        self._executor.submit(_worker)
 
     # ─── Alias externo ────────────────────────────────────────────────────────
 
