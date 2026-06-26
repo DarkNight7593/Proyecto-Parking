@@ -20,6 +20,14 @@ from typing import List, Dict, Optional
 class Database:
     """Capa de datos para ParkingPro usando SQLite con conexiones thread-local."""
 
+    # Longitud máxima de placa aceptada. Debe coincidir con PLACA_MAX_CHARS
+    # de panel_principal.py (no se importa de ahí para no acoplar la capa
+    # de datos a la UI). Esta es la última barrera: si en algún momento
+    # registrar_entrada() se llama desde fuera del panel (script, test,
+    # futura API) sin pasar por los validadores de la UI, esta comprobación
+    # sigue impidiendo que una placa corrupta llegue a la BD.
+    PLACA_MAX_CHARS = 8
+
     def __init__(self, db_path: str = "parkingpro.db"):
         self.db_path = db_path
         # Cada hilo tendrá su propia conexión independiente
@@ -109,6 +117,13 @@ class Database:
         """
         conn  = self._conn()
         placa = placa.upper().strip()
+
+        # Respaldo final: rechazar placas corruptas que hayan llegado hasta
+        # aquí sin pasar por los validadores de la UI.
+        if len(placa) > self.PLACA_MAX_CHARS:
+            raise ValueError(
+                f"La placa '{placa}' supera el máximo de {self.PLACA_MAX_CHARS} caracteres"
+            )
 
         # Verificar duplicado de placa activa
         dup = conn.execute(

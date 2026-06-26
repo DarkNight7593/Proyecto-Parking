@@ -15,13 +15,17 @@ from typing import Dict, List, Callable, Optional
 from ui.theme import C, fuente, TIPOS_VEHICULO
 from installer import PrinterInstaller
 
+# Máximo de líneas que se conservan visibles en el log de actividad.
+# Evita que el CTkTextbox crezca sin límite y ralentice la UI.
+_LOG_MAX_LINEAS = 200
+
 
 class PanelConfiguracion(ctk.CTkFrame):
     """
     Panel de configuración con tres pestañas:
       • Negocio   — datos del negocio y moneda
-      • Tarifas   — precio/hora por tipo + tiempo libre
-      • Impresora — selección de ticketera desde lista instalada
+      • Tarifas   — precio/hora por tipo de vehículo + minutos de gracia
+      • Impresora — selección de ticketera desde lista instalada en Windows
     """
 
     def __init__(
@@ -35,35 +39,45 @@ class PanelConfiguracion(ctk.CTkFrame):
         **kwargs,
     ):
         super().__init__(parent, fg_color=C["bg_dark"], corner_radius=0, **kwargs)
-        self.config       = config
-        self.db           = db
-        self.printer      = printer
-        self.on_guardado  = on_guardado
-        # Getter que devuelve el último estado calculado por main (sin llamar a WMIC)
+        self.config      = config
+        self.db          = db
+        self.printer     = printer
+        self.on_guardado = on_guardado
+
+        # Getter que devuelve el último estado calculado por main (sin llamar a WMIC).
         self._get_estado_imp: Optional[Callable] = get_estado_imp
+
+        # BUG FIX: contador de escaneo para descartar resultados de hilos obsoletos.
+        # Si el usuario pulsa "Actualizar" varias veces seguidas, solo el último
+        # hilo activo actualiza la UI; los anteriores se ignoran silenciosamente.
+        self._scan_id: int = 0
+
         self._build_ui()
 
     def set_printer(self, printer):
         self.printer = printer
 
-    # ─── API pública: main llama aquí cuando cambia el estado ────────────────
+    # ─── API pública: main llama aquí cuando cambia el estado de la impresora ─
 
     def actualizar_estado_imp(self, estado: dict):
         """
         Invocado por main._apply_printer_status cada vez que cambia el estado.
-        Actualiza el badge de la pestaña Impresora si el widget existe.
+        Actualiza el badge de la pestaña Impresora si el widget todavía existe.
+        Debe llamarse siempre desde el hilo principal (p.ej. via self.after(0, ...)).
         """
         if self.winfo_exists():
             self._actualizar_estado_badge(estado)
 
-    # ─── Layout ───────────────────────────────────────────────────────────────
+    # ─── Layout principal ─────────────────────────────────────────────────────
 
     def _build_ui(self):
         hdr = ctk.CTkFrame(self, fg_color=C["sidebar"], height=56, corner_radius=0)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        ctk.CTkLabel(hdr, text="⚙️  Configuración del Sistema",
-                     font=fuente(17, bold=True), text_color=C["text_1"]).pack(side="left", padx=24)
+        ctk.CTkLabel(
+            hdr, text="⚙️  Configuración del Sistema",
+            font=fuente(17, bold=True), text_color=C["text_1"],
+        ).pack(side="left", padx=24)
 
         self._tabs = ctk.CTkTabview(
             self,
@@ -88,8 +102,8 @@ class PanelConfiguracion(ctk.CTkFrame):
     # ─── Tab: Negocio ─────────────────────────────────────────────────────────
 
     def _build_tab_negocio(self, parent):
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent",
-                                         scrollbar_fg_color=C["bg_light"])
+        scroll = ctk.CTkScrollableFrame(
+            parent, fg_color="transparent", scrollbar_fg_color=C["bg_light"])
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
 
         self._entries_negocio: Dict[str, ctk.CTkEntry] = {}
@@ -132,20 +146,107 @@ class PanelConfiguracion(ctk.CTkFrame):
         if self.on_guardado:
             self.on_guardado()
 
-    # ─── Tab: Tarifas ─────────────────────────────────────────────────────────
+    # ─── Tab: Tarifas — validación de entrada en tiempo real ──────────────────
+
+    @staticmethod
+    def _crear_var_tarifa(valor_inicial: float) -> ctk.StringVar:
+        """
+        Devuelve un StringVar con validación automática vía trace.
+
+        Solo acepta números con el formato: [0-999][.][00]
+          • Máximo 3 dígitos enteros   (ej: 1, 12, 999)
+          • Punto decimal opcional
+          • Máximo 2 dígitos decimales (ej: .5, .50)
+          • Ejemplos válidos: 5  |  12.5  |  999.99
+          • Ejemplos inválidos: 1000  |  1.234  |  abc
+
+        El trace revierte automáticamente cualquier carácter ilegal
+        sin necesitar botón de validar — la UI no congela porque todo
+        sucede en el hilo principal de Tkinter.
+        """
+        texto_inicial = f"{valor_inicial:.2f}"
+        var = ctk.StringVar(value=texto_inicial)
+        # Usamos un dict mutable como "celda por referencia" para la closure.
+        estado = {"anterior": texto_inicial, "revirtiendo": False}
+
+        def _on_write(*_):
+            # Guardián de recursión: set() dentro del trace vuelve a dispararlo.
+            if estado["revirtiendo"]:
+                return
+
+            texto = var.get()
+            partes = texto.split(".")
+
+            if len(partes) == 1:
+                # Sin punto decimal: solo dígitos, máximo 3 caracteres.
+                valido = (partes[0] == "" or partes[0].isdigit()) and len(partes[0]) <= 3
+            elif len(partes) == 2:
+                # Con punto decimal: entero ≤3 dígitos, fracción ≤2 dígitos.
+                valido = (
+                    (partes[0] == "" or partes[0].isdigit()) and len(partes[0]) <= 3
+                    and (partes[1] == "" or partes[1].isdigit()) and len(partes[1]) <= 2
+                )
+            else:
+                # Más de un punto decimal → inválido.
+                valido = False
+
+            if valido:
+                estado["anterior"] = texto
+            else:
+                # Revertir al valor previo válido.
+                estado["revirtiendo"] = True
+                var.set(estado["anterior"])
+                estado["revirtiendo"] = False
+
+        var.trace_add("write", _on_write)
+        return var
+
+    @staticmethod
+    def _crear_var_minutos(valor_inicial: int) -> ctk.StringVar:
+        """
+        Devuelve un StringVar con validación automática vía trace.
+
+        Solo acepta enteros de hasta 2 dígitos (0 – 99).
+        Letras, puntos decimales o más de 2 dígitos son rechazados
+        en tiempo real sin congelar la UI.
+        """
+        texto_inicial = str(max(0, valor_inicial))
+        var = ctk.StringVar(value=texto_inicial)
+        estado = {"anterior": texto_inicial, "revirtiendo": False}
+
+        def _on_write(*_):
+            if estado["revirtiendo"]:
+                return
+            texto = var.get()
+            # Solo dígitos, máximo 2 caracteres.
+            valido = (texto == "" or texto.isdigit()) and len(texto) <= 2
+            if valido:
+                estado["anterior"] = texto
+            else:
+                estado["revirtiendo"] = True
+                var.set(estado["anterior"])
+                estado["revirtiendo"] = False
+
+        var.trace_add("write", _on_write)
+        return var
 
     def _build_tab_tarifas(self, parent):
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent",
-                                         scrollbar_fg_color=C["bg_light"])
+        scroll = ctk.CTkScrollableFrame(
+            parent, fg_color="transparent", scrollbar_fg_color=C["bg_light"])
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
 
         self._seccion(scroll, "Precio por Hora — por Tipo de Vehículo")
-        ctk.CTkLabel(scroll,
-                     text="Tarifa que se cobra por cada hora de estacionamiento.",
-                     font=fuente(11), text_color=C["text_3"],
-                     ).pack(anchor="w", padx=10, pady=(0, 12))
+        ctk.CTkLabel(
+            scroll,
+            text="Tarifa que se cobra por cada hora de estacionamiento.",
+            font=fuente(11), text_color=C["text_3"],
+        ).pack(anchor="w", padx=10, pady=(0, 12))
 
         self._entries_tarifas: Dict[str, ctk.CTkEntry] = {}
+        # BUG FIX: guardamos referencias a los StringVar para que el garbage
+        # collector no los destruya mientras el panel esté abierto.
+        self._vars_tarifas: Dict[str, ctk.StringVar] = {}
+
         tarifas = self.config.get_all_tarifas()
 
         grid = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -159,13 +260,19 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._seccion(scroll, "Tolerancia / Tiempo Libre")
         fila_tl = ctk.CTkFrame(scroll, fg_color=C["bg_dark"], corner_radius=10)
         fila_tl.pack(fill="x", padx=4, pady=4)
-        ctk.CTkLabel(fila_tl, text="Minutos de gracia antes de empezar a cobrar:",
-                     font=fuente(12), text_color=C["text_2"]).pack(side="left", padx=16, pady=14)
+        ctk.CTkLabel(
+            fila_tl, text="Minutos de gracia antes de empezar a cobrar:",
+            font=fuente(12), text_color=C["text_2"],
+        ).pack(side="left", padx=16, pady=14)
+
+        # StringVar validado: solo entero de 0 a 99 (máximo 2 dígitos).
+        self._var_tl = self._crear_var_minutos(self.config.get_tiempo_libre())
         self._entry_tl_tarifas = ctk.CTkEntry(
-            fila_tl, fg_color=C["bg_medium"], border_color=C["border"],
+            fila_tl,
+            textvariable=self._var_tl,
+            fg_color=C["bg_medium"], border_color=C["border"],
             text_color=C["text_1"], height=36, width=80, justify="center",
         )
-        self._entry_tl_tarifas.insert(0, str(self.config.get_tiempo_libre()))
         self._entry_tl_tarifas.pack(side="right", padx=16, pady=14)
 
         ctk.CTkButton(
@@ -176,32 +283,49 @@ class PanelConfiguracion(ctk.CTkFrame):
         ).pack(pady=(20, 6))
 
     def _tarifa_card(self, parent, tipo: Dict, tarifa_actual: float) -> ctk.CTkFrame:
+        """Construye la tarjeta de precio para un tipo de vehículo."""
         card = ctk.CTkFrame(parent, fg_color=C["bg_dark"], corner_radius=14)
         ctk.CTkFrame(card, fg_color=tipo["color"], height=4, corner_radius=0).pack(fill="x")
+
         cuerpo = ctk.CTkFrame(card, fg_color="transparent")
         cuerpo.pack(fill="x", padx=14, pady=10)
-        ctk.CTkLabel(cuerpo, text=f"{tipo['emoji']}  {tipo['nombre']}",
-                     font=fuente(14, bold=True), text_color=tipo["color"],
-                     anchor="w").pack(fill="x")
+        ctk.CTkLabel(
+            cuerpo, text=f"{tipo['emoji']}  {tipo['nombre']}",
+            font=fuente(14, bold=True), text_color=tipo["color"], anchor="w",
+        ).pack(fill="x")
+
         fila_precio = ctk.CTkFrame(cuerpo, fg_color="transparent")
         fila_precio.pack(fill="x", pady=(6, 0))
-        ctk.CTkLabel(fila_precio, text=self.config.get_moneda(),
-                     font=fuente(13), text_color=C["text_2"]).pack(side="left")
+        ctk.CTkLabel(
+            fila_precio, text=self.config.get_moneda(),
+            font=fuente(13), text_color=C["text_2"],
+        ).pack(side="left")
+
+        # StringVar con validación en tiempo real: máx 3 dígitos enteros + 2 decimales.
+        var = self._crear_var_tarifa(tarifa_actual)
+        # Guardar referencia en el dict para evitar recolección por GC.
+        self._vars_tarifas[tipo["key"]] = var
+
         entry = ctk.CTkEntry(
             fila_precio,
+            textvariable=var,
             fg_color=C["bg_medium"], border_color=tipo["color"], border_width=1,
             text_color=tipo["color"], font=fuente(16, bold=True),
             height=36, width=90, justify="center",
         )
-        entry.insert(0, f"{tarifa_actual:.2f}")
         entry.pack(side="left", padx=4)
-        ctk.CTkLabel(fila_precio, text="/ hr",
-                     font=fuente(11), text_color=C["text_3"]).pack(side="left")
+        ctk.CTkLabel(
+            fila_precio, text="/ hr",
+            font=fuente(11), text_color=C["text_3"],
+        ).pack(side="left")
+
         self._entries_tarifas[tipo["key"]] = entry
         return card
 
     def _guardar_tarifas(self):
+        """Valida y persiste todas las tarifas y los minutos de gracia."""
         errores = []
+
         for key, entry in self._entries_tarifas.items():
             tipo = next((t for t in TIPOS_VEHICULO if t["key"] == key), None)
             color_orig = tipo["color"] if tipo else C["border"]
@@ -216,7 +340,10 @@ class PanelConfiguracion(ctk.CTkFrame):
                 entry.configure(border_color=C["red"])
 
         try:
-            val_tl = max(0, int(self._entry_tl_tarifas.get().strip()))
+            # BUG FIX: si el campo está vacío (usuario borró todo), lo tratamos como 0
+            # en lugar de lanzar ValueError y marcarlo en rojo.
+            texto_tl = self._entry_tl_tarifas.get().strip()
+            val_tl = max(0, int(texto_tl)) if texto_tl else 0
             self.config.set("sistema", "tiempo_libre_min", str(val_tl))
             self._entry_tl_tarifas.configure(border_color=C["border"])
         except ValueError:
@@ -224,9 +351,11 @@ class PanelConfiguracion(ctk.CTkFrame):
             self._entry_tl_tarifas.configure(border_color=C["red"])
 
         if errores:
-            messagebox.showwarning("Advertencia",
-                                   f"Valores inválidos en: {', '.join(errores)}\n"
-                                   "Los demás se guardaron correctamente.")
+            messagebox.showwarning(
+                "Advertencia",
+                f"Valores inválidos en: {', '.join(errores)}\n"
+                "Los demás se guardaron correctamente.",
+            )
         else:
             messagebox.showinfo("✅ Guardado", "Tarifas guardadas correctamente.")
 
@@ -238,7 +367,8 @@ class PanelConfiguracion(ctk.CTkFrame):
     def _build_tab_impresora(self, parent):
         self._imp_seleccionada: str = self.config.get_nombre_impresora()
 
-        # Botones de acción fijos en la parte inferior (se empaquetan antes que el scroll)
+        # Botones de acción fijos en la parte inferior.
+        # Se empaquetan ANTES que el scroll para que queden anclados abajo.
         btns_frame = ctk.CTkFrame(parent, fg_color=C["bg_dark"], corner_radius=0)
         btns_frame.pack(side="bottom", fill="x", padx=4, pady=(4, 6))
 
@@ -260,23 +390,28 @@ class PanelConfiguracion(ctk.CTkFrame):
             command=self._test_impresora,
         ).pack(side="left", padx=5)
 
-        # Contenido scrollable
-        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent",
-                                         scrollbar_fg_color=C["bg_light"])
+        # Contenido scrollable principal
+        scroll = ctk.CTkScrollableFrame(
+            parent, fg_color="transparent", scrollbar_fg_color=C["bg_light"])
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
 
-        # ── Ticketera activa ──────────────────────────────────────────────
+        # ── Ticketera activa ──────────────────────────────────────────────────
         self._seccion(scroll, "Ticketera Activa")
 
-        self._card_activa = ctk.CTkFrame(scroll, fg_color=C["bg_dark"], corner_radius=10,
-                                          border_color=C["green"], border_width=2)
+        self._card_activa = ctk.CTkFrame(
+            scroll, fg_color=C["bg_dark"], corner_radius=10,
+            border_color=C["green"], border_width=2)
         self._card_activa.pack(fill="x", padx=4, pady=(0, 4))
 
         fila_act = ctk.CTkFrame(self._card_activa, fg_color="transparent")
         fila_act.pack(fill="x", padx=12, pady=(8, 0))
 
-        # Evalúa si está vacía o es el valor de fábrica para mostrar "No seleccionada"
-        nombre_mostrar = self._imp_seleccionada if self._imp_seleccionada and self._imp_seleccionada != "TicketeraEstacionamiento" else "Ninguna (No seleccionada)"
+        # Muestra "No seleccionada" si el valor es vacío o el placeholder de fábrica.
+        nombre_mostrar = (
+            self._imp_seleccionada
+            if self._imp_seleccionada and self._imp_seleccionada != "TicketeraEstacionamiento"
+            else "Ninguna (No seleccionada)"
+        )
 
         self._lbl_imp_activa = ctk.CTkLabel(
             fila_act,
@@ -285,14 +420,14 @@ class PanelConfiguracion(ctk.CTkFrame):
         )
         self._lbl_imp_activa.pack(side="left", fill="x", expand=True)
 
-        # Botón de reparación: solo visible cuando hay error/offline
+        # Botón de reparación: se muestra/oculta dinámicamente según el estado.
         self._btn_reparar = ctk.CTkButton(
             fila_act, text="🔧 Reparar USB",
             fg_color="#ea580c", hover_color="#c2410c",
             text_color="white", font=fuente(11, bold=True), height=26, width=100,
             command=self._reparar_impresora,
         )
-        # Se empaqueta dinámicamente solo cuando hay error (ver _actualizar_estado_badge)
+        # El pack de este botón lo gestiona _actualizar_estado_badge.
 
         self._lbl_estado_imp = ctk.CTkLabel(
             self._card_activa, text="Verificando estado...",
@@ -300,31 +435,33 @@ class PanelConfiguracion(ctk.CTkFrame):
         )
         self._lbl_estado_imp.pack(anchor="w", padx=12, pady=(2, 8))
 
-        # ── Lista de impresoras instaladas ────────────────────────────────
+        # ── Lista de impresoras instaladas en Windows ─────────────────────────
         self._seccion(scroll, "Impresoras Instaladas en Windows")
 
         ctk.CTkLabel(
             scroll,
-            text="Selecciona la impresora que usarás como ticketera.\n"
-                 "⭐ = driver Generic/Text Only (ideal ESC/POS)  •  "
-                 "🔄 = cambiar driver a Generic (requiere Admin)",
+            text=(
+                "Selecciona la impresora que usarás como ticketera.\n"
+                "⭐ = driver Generic/Text Only (ideal ESC/POS)  •  "
+                "🔄 = cambiar driver a Generic (requiere Admin)"
+            ),
             font=fuente(11), text_color=C["text_3"], justify="left",
         ).pack(anchor="w", padx=10, pady=(0, 6))
 
-        lista_border = ctk.CTkFrame(scroll, fg_color=C["bg_dark"],
-                                     corner_radius=12, border_color=C["border"],
-                                     border_width=1)
+        lista_border = ctk.CTkFrame(
+            scroll, fg_color=C["bg_dark"],
+            corner_radius=12, border_color=C["border"], border_width=1)
         lista_border.pack(fill="x", padx=4, pady=(0, 8))
 
         self._frame_lista = ctk.CTkScrollableFrame(
-            lista_border, fg_color="transparent", corner_radius=10,
-            height=200,
-        )
+            lista_border, fg_color="transparent", corner_radius=10, height=200)
         self._frame_lista.pack(fill="x", padx=2, pady=2)
-        ctk.CTkLabel(self._frame_lista, text="🔄  Cargando impresoras...",
-                     font=fuente(12), text_color=C["text_3"]).pack(pady=20)
+        ctk.CTkLabel(
+            self._frame_lista, text="🔄  Cargando impresoras...",
+            font=fuente(12), text_color=C["text_3"],
+        ).pack(pady=20)
 
-        # ── Hardware sin driver ───────────────────────────────────────────
+        # ── Hardware USB sin driver ───────────────────────────────────────────
         self._seccion(scroll, "Hardware USB Detectado sin Driver")
 
         ctk.CTkLabel(
@@ -333,20 +470,20 @@ class PanelConfiguracion(ctk.CTkFrame):
             font=fuente(11), text_color=C["text_3"],
         ).pack(anchor="w", padx=10, pady=(0, 6))
 
-        hw_border = ctk.CTkFrame(scroll, fg_color=C["bg_dark"],
-                                  corner_radius=12, border_color=C["border"],
-                                  border_width=1)
+        hw_border = ctk.CTkFrame(
+            scroll, fg_color=C["bg_dark"],
+            corner_radius=12, border_color=C["border"], border_width=1)
         hw_border.pack(fill="x", padx=4, pady=(0, 8))
 
         self._frame_hw = ctk.CTkScrollableFrame(
-            hw_border, fg_color="transparent", corner_radius=10,
-            height=110,
-        )
+            hw_border, fg_color="transparent", corner_radius=10, height=110)
         self._frame_hw.pack(fill="x", padx=2, pady=2)
-        ctk.CTkLabel(self._frame_hw, text="Presiona 🔄 Actualizar para detectar hardware",
-                     font=fuente(11), text_color=C["text_3"]).pack(pady=14)
+        ctk.CTkLabel(
+            self._frame_hw, text="Presiona 🔄 Actualizar para detectar hardware",
+            font=fuente(11), text_color=C["text_3"],
+        ).pack(pady=14)
 
-        # ── Log ───────────────────────────────────────────────────────────
+        # ── Log de actividad ──────────────────────────────────────────────────
         self._seccion(scroll, "Registro de Actividad")
 
         self._txt_log = ctk.CTkTextbox(
@@ -356,12 +493,12 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._txt_log.pack(fill="x", padx=4, pady=(0, 4))
         self._log("Sistema listo. Presiona 🔄 Actualizar para ver las impresoras.")
 
-        # Auto-escanear al abrir y mostrar el estado actual conocido por main
+        # Auto-escanear al abrir y mostrar el estado actual conocido por main.
         self.after(300, self._escanear)
         self.after(100, self._mostrar_estado_inicial)
 
     def _mostrar_estado_inicial(self):
-        """Lee el estado ya calculado por main y lo aplica al badge."""
+        """Lee el estado ya calculado por main y lo aplica al badge sin llamar a WMIC."""
         estado = (
             self._get_estado_imp()
             if self._get_estado_imp
@@ -369,13 +506,14 @@ class PanelConfiguracion(ctk.CTkFrame):
         )
         self._actualizar_estado_badge(estado)
 
-    # ─── Badge de estado (sin consulta WMIC propia) ───────────────────────────
+    # ─── Badge de estado de impresora (sin consulta WMIC propia) ─────────────
 
     def _actualizar_estado_badge(self, estado: dict = None):
         """
-        Actualiza el badge de la ticketera activa con el estado dado.
-        Si no se pasa 'estado', usa el último conocido por main (via _get_estado_imp).
-        No hace ninguna consulta WMIC — ese trabajo lo hace main.
+        Actualiza el badge visual de la ticketera activa con el estado dado.
+        Si no se pasa 'estado', usa el último conocido por main via _get_estado_imp.
+        No ejecuta ninguna consulta WMIC — ese trabajo lo hace main.py.
+        Solo debe llamarse desde el hilo principal de Tkinter.
         """
         if not self.winfo_exists():
             return
@@ -394,7 +532,6 @@ class PanelConfiguracion(ctk.CTkFrame):
             color_borde  = C["green"]
             color_txt    = C["green"]
             color_titulo = C["green"]
-            # Ocultar botón de reparar
             self._btn_reparar.pack_forget()
         elif nivel == "warning":
             color_borde  = C["yellow"]
@@ -406,7 +543,6 @@ class PanelConfiguracion(ctk.CTkFrame):
             color_txt    = C["red"]
             color_titulo = C["text_1"]
             self._log(f"⚠ Error detectado: {msg}")
-            # Mostrar botón de reparar
             self._btn_reparar.pack(side="left")
         else:  # offline
             color_borde  = C["red"]
@@ -415,9 +551,11 @@ class PanelConfiguracion(ctk.CTkFrame):
             self._btn_reparar.pack(side="left")
 
         try:
-            # Formateamos nuevamente el nombre por si el loop intenta sobreescribirlo
-            nombre_mostrar = self._imp_seleccionada if self._imp_seleccionada and self._imp_seleccionada != "TicketeraEstacionamiento" else "Ninguna (No seleccionada)"
-            
+            nombre_mostrar = (
+                self._imp_seleccionada
+                if self._imp_seleccionada and self._imp_seleccionada != "TicketeraEstacionamiento"
+                else "Ninguna (No seleccionada)"
+            )
             self._lbl_estado_imp.configure(text=msg, text_color=color_txt)
             self._card_activa.configure(border_color=color_borde)
             self._lbl_imp_activa.configure(
@@ -430,81 +568,121 @@ class PanelConfiguracion(ctk.CTkFrame):
     # ─── Selección de impresora ───────────────────────────────────────────────
 
     def _seleccionar_impresora(self, nombre: str):
-        """Guarda la impresora seleccionada y actualiza la UI."""
+        """Guarda la impresora seleccionada, actualiza la UI y recarga la lista."""
         self._imp_seleccionada = nombre
         self.config.set("impresora", "nombre", nombre)
         from printer import Printer
         self.printer = Printer(nombre)
         self._log(f"✅ Impresora seleccionada: {nombre}")
         self._lbl_imp_activa.configure(text=f"🖨️  {nombre}")
-        # Mostrar "Verificando..." hasta que main empuje el estado real (~5 s)
+        # Mostrar "Verificando..." hasta que main empuje el estado real (~5 s).
         self._actualizar_estado_badge({"nivel": "warning", "mensaje": "Verificando estado..."})
         if self.on_guardado:
             self.on_guardado()
         self._escanear()
 
-    # ─── Escaneo en background ────────────────────────────────────────────────
+    # ─── Escaneo de impresoras en background ──────────────────────────────────
 
     def _escanear(self):
-        """Lanza el escaneo de impresoras instaladas en un hilo daemon."""
+        """
+        Lanza el escaneo de impresoras instaladas en un hilo daemon.
+
+        BUG FIX (threading): incrementamos _scan_id antes de iniciar el hilo.
+        Si el usuario pulsa "Actualizar" varias veces, cada hilo captura su
+        propio scan_id. Solo el hilo cuyo scan_id coincide con el actual
+        puede actualizar la UI — los hilos obsoletos descartan sus resultados.
+        """
+        self._scan_id += 1
+        scan_id_actual = self._scan_id
+
+        # Limpiar la lista y mostrar indicador de carga
         for w in self._frame_lista.winfo_children():
             w.destroy()
-        ctk.CTkLabel(self._frame_lista, text="🔄  Escaneando...",
-                     font=fuente(12), text_color=C["yellow"]).pack(pady=20)
+        ctk.CTkLabel(
+            self._frame_lista, text="🔄  Escaneando...",
+            font=fuente(12), text_color=C["yellow"],
+        ).pack(pady=20)
 
         for w in self._frame_hw.winfo_children():
             w.destroy()
-        ctk.CTkLabel(self._frame_hw, text="🔄  Escaneando hardware...",
-                     font=fuente(11), text_color=C["yellow"]).pack(pady=14)
+        ctk.CTkLabel(
+            self._frame_hw, text="🔄  Escaneando hardware...",
+            font=fuente(11), text_color=C["yellow"],
+        ).pack(pady=14)
 
         self._log("Buscando impresoras instaladas y hardware USB...")
-        threading.Thread(target=self._scan_worker, daemon=True).start()
+        threading.Thread(
+            target=lambda: self._scan_worker(scan_id_actual),
+            daemon=True,
+        ).start()
 
-    def _scan_worker(self):
+    def _scan_worker(self, scan_id: int):
+        """
+        Hilo de trabajo: obtiene la lista de impresoras y hardware.
+        Cuando termina, posta el resultado al hilo principal via after().
+        El scan_id se propaga para que _mostrar_resultados pueda
+        descartar resultados de escaneos ya superados.
+        """
         inst       = PrinterInstaller(self._imp_seleccionada)
         impresoras = inst.listar_impresoras_detalle()
         hardware   = inst.listar_hardware_sin_driver()
-        self.after(0, lambda: self._mostrar_resultados(impresoras, hardware))
+        # Siempre se vuelve al hilo principal para tocar la UI.
+        self.after(0, lambda: self._mostrar_resultados(impresoras, hardware, scan_id))
 
-    def _mostrar_resultados(self, impresoras: List[Dict], hardware: List[Dict]):
+    def _mostrar_resultados(self, impresoras: List[Dict], hardware: List[Dict], scan_id: int):
+        """
+        Renderiza los resultados del escaneo en la UI.
+        Retorna silenciosamente si el widget ya no existe o si este
+        scan_id ya fue superado por un escaneo más reciente.
+        """
         if not self.winfo_exists():
             return
 
-        # Lista de impresoras
+        # BUG FIX: descartar resultados de hilos de escaneo obsoletos.
+        if scan_id != self._scan_id:
+            return
+
+        # ── Renderizar lista de impresoras ────────────────────────────────────
         for w in self._frame_lista.winfo_children():
             w.destroy()
 
         if not impresoras:
             ctk.CTkLabel(
                 self._frame_lista,
-                text="❌  No se encontraron impresoras instaladas en Windows.\n"
-                     "Instala una impresora con driver Generic/Text Only primero.",
+                text=(
+                    "❌  No se encontraron impresoras instaladas en Windows.\n"
+                    "Instala una impresora con driver Generic/Text Only primero."
+                ),
                 font=fuente(11), text_color=C["red"],
             ).pack(pady=20)
         else:
             for imp in impresoras:
                 self._render_imp_card(imp)
 
-        self._log(f"Encontradas: {len(impresoras)} impresoras, "
-                  f"{len(hardware)} dispositivo(s) sin driver.")
+        self._log(
+            f"Encontradas: {len(impresoras)} impresoras, "
+            f"{len(hardware)} dispositivo(s) sin driver."
+        )
 
-        # Hardware sin driver
+        # ── Renderizar hardware sin driver ────────────────────────────────────
         for w in self._frame_hw.winfo_children():
             w.destroy()
 
         if not hardware:
-            ctk.CTkLabel(self._frame_hw,
-                         text="✓  No hay hardware sin driver pendiente",
-                         font=fuente(11), text_color=C["text_3"]).pack(pady=14)
+            ctk.CTkLabel(
+                self._frame_hw,
+                text="✓  No hay hardware sin driver pendiente",
+                font=fuente(11), text_color=C["text_3"],
+            ).pack(pady=14)
         else:
             for dev in hardware:
                 self._render_hw_card(dev)
 
-        # Refrescar badge con el estado actual conocido (sin nueva llamada WMIC)
+        # Refrescar badge con el estado actual conocido (sin nueva llamada WMIC).
         self._actualizar_estado_badge()
 
     def _render_imp_card(self, imp: Dict):
-        """Tarjeta para cada impresora instalada."""
+        """Tarjeta para cada impresora instalada en la lista."""
         nombre    = imp["nombre"]
         driver    = imp["driver"]
         puerto    = imp["puerto"]
@@ -516,8 +694,9 @@ class PanelConfiguracion(ctk.CTkFrame):
         border_w     = 2 if (es_activa or es_compat) else 1
         bg_card      = C["bg_medium"] if es_compat else C["bg_dark"]
 
-        card = ctk.CTkFrame(self._frame_lista, fg_color=bg_card, corner_radius=10,
-                             border_color=border_color, border_width=border_w)
+        card = ctk.CTkFrame(
+            self._frame_lista, fg_color=bg_card, corner_radius=10,
+            border_color=border_color, border_width=border_w)
         card.pack(fill="x", padx=8, pady=4)
 
         left = ctk.CTkFrame(card, fg_color="transparent")
@@ -527,34 +706,39 @@ class PanelConfiguracion(ctk.CTkFrame):
         top_row.pack(fill="x")
 
         name_color = C["green"] if es_activa else C["text_1"]
-        ctk.CTkLabel(top_row, text=f"🖨️  {nombre}",
-                     font=fuente(13, bold=True), text_color=name_color,
-                     anchor="w").pack(side="left")
+        ctk.CTkLabel(
+            top_row, text=f"🖨️  {nombre}",
+            font=fuente(13, bold=True), text_color=name_color, anchor="w",
+        ).pack(side="left")
 
         if es_compat:
-            ctk.CTkLabel(top_row, text="⭐ Recomendada",
-                          font=fuente(9, bold=True),
-                          fg_color=C["blue"], text_color="white",
-                          corner_radius=8, width=100, height=20,
-                          ).pack(side="left", padx=(10, 0))
+            ctk.CTkLabel(
+                top_row, text="⭐ Recomendada",
+                font=fuente(9, bold=True),
+                fg_color=C["blue"], text_color="white",
+                corner_radius=8, width=100, height=20,
+            ).pack(side="left", padx=(10, 0))
         elif es_ticket:
-            ctk.CTkLabel(top_row, text="⚠ Driver propio",
-                          font=fuente(9, bold=True),
-                          fg_color=C["yellow_h"], text_color="white",
-                          corner_radius=8, width=100, height=20,
-                          ).pack(side="left", padx=(10, 0))
+            ctk.CTkLabel(
+                top_row, text="⚠ Driver propio",
+                font=fuente(9, bold=True),
+                fg_color=C["yellow_h"], text_color="white",
+                corner_radius=8, width=100, height=20,
+            ).pack(side="left", padx=(10, 0))
 
-        ctk.CTkLabel(left,
-                     text=f"Driver: {driver}   •   Puerto: {puerto}",
-                     font=fuente(10), text_color=C["text_3"],
-                     anchor="w").pack(fill="x", pady=(2, 0))
+        ctk.CTkLabel(
+            left, text=f"Driver: {driver}   •   Puerto: {puerto}",
+            font=fuente(10), text_color=C["text_3"], anchor="w",
+        ).pack(fill="x", pady=(2, 0))
 
         right = ctk.CTkFrame(card, fg_color="transparent")
         right.pack(side="right", padx=14, pady=10)
 
         if es_activa:
-            ctk.CTkLabel(right, text="✓ Seleccionada",
-                         font=fuente(11, bold=True), text_color=C["green"]).pack()
+            ctk.CTkLabel(
+                right, text="✓ Seleccionada",
+                font=fuente(11, bold=True), text_color=C["green"],
+            ).pack()
         elif es_compat:
             ctk.CTkButton(
                 right, text="Seleccionar",
@@ -573,22 +757,25 @@ class PanelConfiguracion(ctk.CTkFrame):
             ).pack()
 
     def _render_hw_card(self, dev: Dict):
-        """Tarjeta para hardware USB detectado sin driver."""
+        """Tarjeta para hardware USB detectado sin driver instalado."""
         nombre = dev.get("nombre", "Desconocido")
 
-        card = ctk.CTkFrame(self._frame_hw, fg_color=C["bg_medium"], corner_radius=8,
-                             border_color=C["yellow"], border_width=1)
+        card = ctk.CTkFrame(
+            self._frame_hw, fg_color=C["bg_medium"], corner_radius=8,
+            border_color=C["yellow"], border_width=1)
         card.pack(fill="x", padx=8, pady=4)
 
         left = ctk.CTkFrame(card, fg_color="transparent")
         left.pack(side="left", fill="x", expand=True, padx=14, pady=10)
 
-        ctk.CTkLabel(left, text=f"🖨️  {nombre}",
-                     font=fuente(12, bold=True), text_color=C["yellow"],
-                     anchor="w").pack(fill="x")
-        ctk.CTkLabel(left, text="Sin driver — necesita instalación",
-                     font=fuente(10), text_color=C["text_3"],
-                     anchor="w").pack(fill="x")
+        ctk.CTkLabel(
+            left, text=f"🖨️  {nombre}",
+            font=fuente(12, bold=True), text_color=C["yellow"], anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            left, text="Sin driver — necesita instalación",
+            font=fuente(10), text_color=C["text_3"], anchor="w",
+        ).pack(fill="x")
 
         ctk.CTkButton(
             card, text="🛡️ Instalar\n(Admin)",
@@ -598,12 +785,14 @@ class PanelConfiguracion(ctk.CTkFrame):
             command=lambda n=nombre: self._instalar_driver_admin(n),
         ).pack(side="right", padx=14, pady=10)
 
-    # ─── Cambiar driver a Generic ─────────────────────────────────────────────
+    # ─── Cambiar driver a Generic/Text Only ───────────────────────────────────
 
     def _cambiar_driver_generico(self, nombre_impresora: str):
         """
         Cambia el driver a Generic/Text Only via UAC.
         Necesario para que ESC/POS funcione en ticketeras con driver propio.
+        La operación pesada corre en un hilo daemon; la UI se actualiza
+        desde el hilo principal via after().
         """
         if not messagebox.askyesno(
             "Cambiar Driver a Generic/Text Only",
@@ -646,13 +835,19 @@ class PanelConfiguracion(ctk.CTkFrame):
                         "Intenta de nuevo o hazlo manualmente en:\n"
                         "Dispositivos e Impresoras → Propiedades → Avanzadas → Driver",
                     )
+
             self.after(0, _ui)
 
         threading.Thread(target=_run, daemon=True).start()
 
-    # ─── Instalación de driver ────────────────────────────────────────────────
+    # ─── Instalación de driver (hardware sin driver) ──────────────────────────
 
     def _instalar_driver_admin(self, nombre_modelo: str):
+        """
+        Instala el driver de una ticketera detectada sin driver.
+        La operación pesada corre en un hilo daemon; la UI se actualiza
+        desde el hilo principal via after().
+        """
         if not messagebox.askyesno(
             "Permisos de Administrador",
             f"Windows pedirá permisos de Administrador para instalar:\n\n{nombre_modelo}\n\n"
@@ -670,7 +865,7 @@ class PanelConfiguracion(ctk.CTkFrame):
             exito = inst.instalar_como_admin(
                 nombre_modelo,
                 puerto=puerto_detectado,
-                log=lambda m: self.after(0, self._log, m)
+                log=lambda m: self.after(0, self._log, m),
             )
 
             def _ui():
@@ -683,7 +878,8 @@ class PanelConfiguracion(ctk.CTkFrame):
                     self._lbl_imp_activa.configure(text=f"🖨️  {nombre_modelo}")
                     messagebox.showinfo(
                         "Éxito",
-                        f"¡'{nombre_modelo}' instalada y seleccionada como ticketera!")
+                        f"¡'{nombre_modelo}' instalada y seleccionada como ticketera!"
+                    )
                     self._escanear()
                     if self.on_guardado:
                         self.on_guardado()
@@ -695,7 +891,9 @@ class PanelConfiguracion(ctk.CTkFrame):
                         "Posibles causas:\n"
                         "• Rechazaste el permiso de Administrador\n"
                         "• La ticketera no estaba conectada\n"
-                        "• Windows bloqueó la instalación")
+                        "• Windows bloqueó la instalación",
+                    )
+
             self.after(0, _ui)
 
         threading.Thread(target=_run, daemon=True).start()
@@ -703,10 +901,16 @@ class PanelConfiguracion(ctk.CTkFrame):
     # ─── Test de impresión ────────────────────────────────────────────────────
 
     def _test_impresora(self):
+        """
+        Envía una página de prueba a la ticketera activa.
+        La llamada bloqueante se ejecuta en un hilo daemon para no
+        congelar la UI; el resultado se muestra desde el hilo principal.
+        """
         inst = PrinterInstaller(self._imp_seleccionada)
         threading.Thread(
-            target=lambda: self.after(0, self._mostrar_resultado_test,
-                                      *inst.imprimir_pagina_prueba()),
+            target=lambda: self.after(
+                0, self._mostrar_resultado_test, *inst.imprimir_pagina_prueba()
+            ),
             daemon=True,
         ).start()
 
@@ -717,13 +921,18 @@ class PanelConfiguracion(ctk.CTkFrame):
         else:
             messagebox.showwarning("Prueba de Impresión", msg)
 
-    # ─── Reparación automática ────────────────────────────────────────────────
+    # ─── Reparación automática de conexión USB ────────────────────────────────
 
     def _reparar_impresora(self):
+        """
+        Intenta reconectar la ticketera buscando su puerto USB actual.
+        La operación pesada corre en un hilo daemon; la UI se actualiza
+        desde el hilo principal via after().
+        """
         if not messagebox.askyesno(
             "Reparar Conexión USB",
             "¿Deseas buscar la ticketera en los puertos USB y reconectarla automáticamente?\n\n"
-            "Windows podría pedir permisos de Administrador."
+            "Windows podría pedir permisos de Administrador.",
         ):
             return
 
@@ -741,40 +950,57 @@ class PanelConfiguracion(ctk.CTkFrame):
                     messagebox.showinfo(
                         "Reparación",
                         "Se actualizó el puerto de la impresora.\n"
-                        "Presiona 🧪 Prueba para verificar que todo funciona."
+                        "Presiona 🧪 Prueba para verificar que todo funciona.",
                     )
                     self._escanear()
                 else:
                     self._log("❌ Falló la reparación.")
+
             self.after(0, _ui)
 
         threading.Thread(target=_run, daemon=True).start()
 
-    # ─── Helpers ──────────────────────────────────────────────────────────────
+    # ─── Helpers de UI ────────────────────────────────────────────────────────
 
     def _seccion(self, parent, titulo: str):
+        """Dibuja un encabezado de sección con línea separadora."""
         f = ctk.CTkFrame(parent, fg_color="transparent")
         f.pack(fill="x", padx=4, pady=(16, 4))
-        ctk.CTkLabel(f, text=titulo, font=fuente(13, bold=True),
-                     text_color=C["text_2"], anchor="w").pack(side="left")
+        ctk.CTkLabel(
+            f, text=titulo, font=fuente(13, bold=True),
+            text_color=C["text_2"], anchor="w",
+        ).pack(side="left")
         ctk.CTkFrame(f, fg_color=C["border"], height=1).pack(
             side="left", fill="x", expand=True, padx=(10, 0), pady=6)
 
     def _campo_entrada(self, parent, label: str, valor: str = "") -> ctk.CTkEntry:
+        """Fila etiqueta + campo de texto para los formularios de texto libre."""
         fila = ctk.CTkFrame(parent, fg_color="transparent")
         fila.pack(fill="x", padx=4, pady=4)
-        ctk.CTkLabel(fila, text=label, font=fuente(12), text_color=C["text_2"],
-                     width=280, anchor="w").pack(side="left")
-        entry = ctk.CTkEntry(fila, fg_color=C["bg_dark"], border_color=C["border"],
-                              text_color=C["text_1"], height=36, width=280)
+        ctk.CTkLabel(
+            fila, text=label, font=fuente(12), text_color=C["text_2"],
+            width=280, anchor="w",
+        ).pack(side="left")
+        entry = ctk.CTkEntry(
+            fila, fg_color=C["bg_dark"], border_color=C["border"],
+            text_color=C["text_1"], height=36, width=280)
         entry.insert(0, valor)
         entry.pack(side="right")
         return entry
 
     def _log(self, texto: str):
+        """
+        Añade una línea al log de actividad desde el hilo principal.
+        BUG FIX: limita el log a _LOG_MAX_LINEAS para evitar que el
+        CTkTextbox crezca sin límite y ralentice la aplicación.
+        """
         try:
             self._txt_log.configure(state="normal")
             self._txt_log.insert("end", texto + "\n")
+            # Eliminar las líneas más antiguas si se supera el límite.
+            total = int(self._txt_log.index("end-1c").split(".")[0])
+            if total > _LOG_MAX_LINEAS:
+                self._txt_log.delete("1.0", f"{total - _LOG_MAX_LINEAS}.0")
             self._txt_log.see("end")
             self._txt_log.configure(state="disabled")
         except Exception:

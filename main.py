@@ -196,7 +196,7 @@ class ParkingProApp(ctk.CTk):
         self._lbl_printer.pack(fill="x", padx=10, pady=(0, 8))
 
         # Versión
-        ctk.CTkLabel(sb, text="ParkingPro v1.0.0 © 2025",
+        ctk.CTkLabel(sb, text="ParkingPro v1.0.0 © 2026",
                      font=fuente(9), text_color=C["text_3"]).pack(pady=(2, 8))
 
     # ─── Navegación ───────────────────────────────────────────────────────────
