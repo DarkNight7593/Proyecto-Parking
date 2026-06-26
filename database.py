@@ -26,7 +26,7 @@ class Database:
     # registrar_entrada() se llama desde fuera del panel (script, test,
     # futura API) sin pasar por los validadores de la UI, esta comprobación
     # sigue impidiendo que una placa corrupta llegue a la BD.
-    PLACA_MAX_CHARS = 8
+    PLACA_MAX_CHARS = 10
 
     def __init__(self, db_path: str = "parkingpro.db"):
         self.db_path = db_path

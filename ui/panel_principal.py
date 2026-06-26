@@ -48,7 +48,7 @@ PLACA_CHARS_RE = re.compile(r'^[\w-]+$')
 
 
 # Máximo de caracteres permitidos en el campo de placa (8 caracteres)
-PLACA_MAX_CHARS = 8
+PLACA_MAX_CHARS = 10
 
 # Texto de placeholder del campo de placa. Es más largo que PLACA_MAX_CHARS
 # a propósito (es solo un texto de ejemplo, no una placa real), por lo que
