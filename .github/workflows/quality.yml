@@ -1,0 +1,23 @@
+name: Quality
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --extra dev
+      - run: uv run pytest --cov=parkingpro --cov-report=term-missing
+      - run: uv run ruff check .
+

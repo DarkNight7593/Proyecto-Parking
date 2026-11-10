@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "parkingpro"
+version = "1.1.0"
+description = "Sistema de escritorio para la operación y reportería de estacionamientos."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Juan Inca" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Office/Business",
+]
+dependencies = [
+    "customtkinter>=5.2,<6",
+    "matplotlib>=3.7,<4",
+    "openpyxl>=3.1,<4",
+    "pillow>=10,<13",
+    "platformdirs>=4,<5",
+    "pywin32>=306; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<10",
+    "pytest-cov>=6,<8",
+    "ruff>=0.14,<0.16",
+]
+
+[project.gui-scripts]
+parkingpro = "parkingpro.bootstrap:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["parkingpro*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+branch = true
+source = ["parkingpro"]
+omit = [
+    "*/parkingpro/__main__.py",
+    "*/parkingpro/bootstrap.py",
+    "*/parkingpro/infrastructure/printing/*",
+    "*/parkingpro/presentation/*",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+

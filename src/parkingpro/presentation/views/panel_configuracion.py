@@ -2,18 +2,22 @@
 ParkingPro - Panel de Configuración
 Tabs: Negocio | Tarifas | Impresora
 
-El estado de la impresora lo provee main.py (que ya corre su loop cada 5 s).
+El estado de la impresora lo provee la aplicación (que ejecuta un ciclo cada 5 s).
 Este panel no hace su propia consulta WMIC; en cambio:
   • Recibe 'get_estado_imp' (callable) para leer el último estado conocido al abrirse.
   • Recibe el estado actualizado vía actualizar_estado_imp() cada vez que main lo llama.
 """
-import threading
-import customtkinter as ctk
-from tkinter import messagebox
-from typing import Dict, List, Callable, Optional
 
-from ui.theme import C, fuente, TIPOS_VEHICULO
-from installer import PrinterInstaller
+import logging
+import threading
+from collections.abc import Callable
+from tkinter import messagebox
+
+import customtkinter as ctk
+
+from parkingpro.presentation.theme import TIPOS_VEHICULO, C, fuente
+
+logger = logging.getLogger(__name__)
 
 # Máximo de líneas que se conservan visibles en el log de actividad.
 # Evita que el CTkTextbox crezca sin límite y ralentice la UI.
@@ -32,20 +36,22 @@ class PanelConfiguracion(ctk.CTkFrame):
         self,
         parent,
         config,
-        db,
         printer,
+        printer_factory: Callable,
+        installer_factory: Callable,
         on_guardado: Callable = None,
-        get_estado_imp: Callable = None,   # () → dict con 'nivel' y 'mensaje'
+        get_estado_imp: Callable = None,  # () → dict con 'nivel' y 'mensaje'
         **kwargs,
     ):
         super().__init__(parent, fg_color=C["bg_dark"], corner_radius=0, **kwargs)
-        self.config      = config
-        self.db          = db
-        self.printer     = printer
+        self.config = config
+        self.printer = printer
         self.on_guardado = on_guardado
+        self._printer_factory = printer_factory
+        self._installer_factory = installer_factory
 
         # Getter que devuelve el último estado calculado por main (sin llamar a WMIC).
-        self._get_estado_imp: Optional[Callable] = get_estado_imp
+        self._get_estado_imp: Callable | None = get_estado_imp
 
         # BUG FIX: contador de escaneo para descartar resultados de hilos obsoletos.
         # Si el usuario pulsa "Actualizar" varias veces seguidas, solo el último
@@ -75,8 +81,10 @@ class PanelConfiguracion(ctk.CTkFrame):
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
         ctk.CTkLabel(
-            hdr, text="⚙️  Configuración del Sistema",
-            font=fuente(17, bold=True), text_color=C["text_1"],
+            hdr,
+            text="⚙️  Configuración del Sistema",
+            font=fuente(17, bold=True),
+            text_color=C["text_1"],
         ).pack(side="left", padx=24)
 
         self._tabs = ctk.CTkTabview(
@@ -103,30 +111,36 @@ class PanelConfiguracion(ctk.CTkFrame):
 
     def _build_tab_negocio(self, parent):
         scroll = ctk.CTkScrollableFrame(
-            parent, fg_color="transparent", scrollbar_fg_color=C["bg_light"])
+            parent, fg_color="transparent", scrollbar_fg_color=C["bg_light"]
+        )
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
 
-        self._entries_negocio: Dict[str, ctk.CTkEntry] = {}
+        self._entries_negocio: dict[str, ctk.CTkEntry] = {}
 
         self._seccion(scroll, "Datos del Negocio")
         datos = self.config.get_datos_negocio()
         for label, key, valor in [
-            ("Nombre del estacionamiento", "nombre",    datos["nombre"]),
-            ("Dirección",                  "direccion", datos["direccion"]),
-            ("Teléfono",                   "telefono",  datos["telefono"]),
-            ("RUC / N° Documento",         "ruc",       datos["ruc"]),
+            ("Nombre del estacionamiento", "nombre", datos["nombre"]),
+            ("Dirección", "direccion", datos["direccion"]),
+            ("Teléfono", "telefono", datos["telefono"]),
+            ("RUC / N° Documento", "ruc", datos["ruc"]),
         ]:
             self._entries_negocio[key] = self._campo_entrada(scroll, label, valor)
 
         self._seccion(scroll, "Sistema")
         self._entry_moneda = self._campo_entrada(
-            scroll, "Símbolo de moneda (ej: S/, $, €)", self.config.get_moneda())
+            scroll, "Símbolo de moneda (ej: S/, $, €)", self.config.get_moneda()
+        )
 
         ctk.CTkButton(
-            scroll, text="💾  Guardar Datos del Negocio",
-            fg_color=C["blue"], hover_color=C["blue_h"],
-            text_color="white", font=fuente(13, bold=True),
-            height=42, command=self._guardar_negocio,
+            scroll,
+            text="💾  Guardar Datos del Negocio",
+            fg_color=C["blue"],
+            hover_color=C["blue_h"],
+            text_color="white",
+            font=fuente(13, bold=True),
+            height=42,
+            command=self._guardar_negocio,
         ).pack(pady=(20, 6))
 
     def _guardar_negocio(self):
@@ -183,8 +197,10 @@ class PanelConfiguracion(ctk.CTkFrame):
             elif len(partes) == 2:
                 # Con punto decimal: entero ≤3 dígitos, fracción ≤2 dígitos.
                 valido = (
-                    (partes[0] == "" or partes[0].isdigit()) and len(partes[0]) <= 3
-                    and (partes[1] == "" or partes[1].isdigit()) and len(partes[1]) <= 2
+                    (partes[0] == "" or partes[0].isdigit())
+                    and len(partes[0]) <= 3
+                    and (partes[1] == "" or partes[1].isdigit())
+                    and len(partes[1]) <= 2
                 )
             else:
                 # Más de un punto decimal → inválido.
@@ -232,20 +248,22 @@ class PanelConfiguracion(ctk.CTkFrame):
 
     def _build_tab_tarifas(self, parent):
         scroll = ctk.CTkScrollableFrame(
-            parent, fg_color="transparent", scrollbar_fg_color=C["bg_light"])
+            parent, fg_color="transparent", scrollbar_fg_color=C["bg_light"]
+        )
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
 
         self._seccion(scroll, "Precio por Hora — por Tipo de Vehículo")
         ctk.CTkLabel(
             scroll,
             text="Tarifa que se cobra por cada hora de estacionamiento.",
-            font=fuente(11), text_color=C["text_3"],
+            font=fuente(11),
+            text_color=C["text_3"],
         ).pack(anchor="w", padx=10, pady=(0, 12))
 
-        self._entries_tarifas: Dict[str, ctk.CTkEntry] = {}
+        self._entries_tarifas: dict[str, ctk.CTkEntry] = {}
         # BUG FIX: guardamos referencias a los StringVar para que el garbage
         # collector no los destruya mientras el panel esté abierto.
-        self._vars_tarifas: Dict[str, ctk.StringVar] = {}
+        self._vars_tarifas: dict[str, ctk.StringVar] = {}
 
         tarifas = self.config.get_all_tarifas()
 
@@ -261,8 +279,10 @@ class PanelConfiguracion(ctk.CTkFrame):
         fila_tl = ctk.CTkFrame(scroll, fg_color=C["bg_dark"], corner_radius=10)
         fila_tl.pack(fill="x", padx=4, pady=4)
         ctk.CTkLabel(
-            fila_tl, text="Minutos de gracia antes de empezar a cobrar:",
-            font=fuente(12), text_color=C["text_2"],
+            fila_tl,
+            text="Minutos de gracia antes de empezar a cobrar:",
+            font=fuente(12),
+            text_color=C["text_2"],
         ).pack(side="left", padx=16, pady=14)
 
         # StringVar validado: solo entero de 0 a 99 (máximo 2 dígitos).
@@ -270,19 +290,27 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._entry_tl_tarifas = ctk.CTkEntry(
             fila_tl,
             textvariable=self._var_tl,
-            fg_color=C["bg_medium"], border_color=C["border"],
-            text_color=C["text_1"], height=36, width=80, justify="center",
+            fg_color=C["bg_medium"],
+            border_color=C["border"],
+            text_color=C["text_1"],
+            height=36,
+            width=80,
+            justify="center",
         )
         self._entry_tl_tarifas.pack(side="right", padx=16, pady=14)
 
         ctk.CTkButton(
-            scroll, text="💾  Guardar Tarifas",
-            fg_color=C["green"], hover_color=C["green_h"],
-            text_color="white", font=fuente(13, bold=True),
-            height=42, command=self._guardar_tarifas,
+            scroll,
+            text="💾  Guardar Tarifas",
+            fg_color=C["green"],
+            hover_color=C["green_h"],
+            text_color="white",
+            font=fuente(13, bold=True),
+            height=42,
+            command=self._guardar_tarifas,
         ).pack(pady=(20, 6))
 
-    def _tarifa_card(self, parent, tipo: Dict, tarifa_actual: float) -> ctk.CTkFrame:
+    def _tarifa_card(self, parent, tipo: dict, tarifa_actual: float) -> ctk.CTkFrame:
         """Construye la tarjeta de precio para un tipo de vehículo."""
         card = ctk.CTkFrame(parent, fg_color=C["bg_dark"], corner_radius=14)
         ctk.CTkFrame(card, fg_color=tipo["color"], height=4, corner_radius=0).pack(fill="x")
@@ -290,15 +318,20 @@ class PanelConfiguracion(ctk.CTkFrame):
         cuerpo = ctk.CTkFrame(card, fg_color="transparent")
         cuerpo.pack(fill="x", padx=14, pady=10)
         ctk.CTkLabel(
-            cuerpo, text=f"{tipo['emoji']}  {tipo['nombre']}",
-            font=fuente(14, bold=True), text_color=tipo["color"], anchor="w",
+            cuerpo,
+            text=f"{tipo['emoji']}  {tipo['nombre']}",
+            font=fuente(14, bold=True),
+            text_color=tipo["color"],
+            anchor="w",
         ).pack(fill="x")
 
         fila_precio = ctk.CTkFrame(cuerpo, fg_color="transparent")
         fila_precio.pack(fill="x", pady=(6, 0))
         ctk.CTkLabel(
-            fila_precio, text=self.config.get_moneda(),
-            font=fuente(13), text_color=C["text_2"],
+            fila_precio,
+            text=self.config.get_moneda(),
+            font=fuente(13),
+            text_color=C["text_2"],
         ).pack(side="left")
 
         # StringVar con validación en tiempo real: máx 3 dígitos enteros + 2 decimales.
@@ -309,14 +342,21 @@ class PanelConfiguracion(ctk.CTkFrame):
         entry = ctk.CTkEntry(
             fila_precio,
             textvariable=var,
-            fg_color=C["bg_medium"], border_color=tipo["color"], border_width=1,
-            text_color=tipo["color"], font=fuente(16, bold=True),
-            height=36, width=90, justify="center",
+            fg_color=C["bg_medium"],
+            border_color=tipo["color"],
+            border_width=1,
+            text_color=tipo["color"],
+            font=fuente(16, bold=True),
+            height=36,
+            width=90,
+            justify="center",
         )
         entry.pack(side="left", padx=4)
         ctk.CTkLabel(
-            fila_precio, text="/ hr",
-            font=fuente(11), text_color=C["text_3"],
+            fila_precio,
+            text="/ hr",
+            font=fuente(11),
+            text_color=C["text_3"],
         ).pack(side="left")
 
         self._entries_tarifas[tipo["key"]] = entry
@@ -376,31 +416,43 @@ class PanelConfiguracion(ctk.CTkFrame):
         btns_inner.pack(pady=6)
 
         ctk.CTkButton(
-            btns_inner, text="🔄  Actualizar Lista",
-            fg_color=C["bg_light"], hover_color=C["border"],
-            text_color=C["text_1"], font=fuente(12), height=40, width=180,
+            btns_inner,
+            text="🔄  Actualizar Lista",
+            fg_color=C["bg_light"],
+            hover_color=C["border"],
+            text_color=C["text_1"],
+            font=fuente(12),
+            height=40,
+            width=180,
             command=self._escanear,
         ).pack(side="left", padx=5)
 
         ctk.CTkButton(
-            btns_inner, text="🧪  Página de Prueba",
-            fg_color=C["bg_dark"], hover_color=C["bg_light"],
-            text_color=C["text_2"], font=fuente(12), height=40, width=160,
-            border_color=C["border"], border_width=1,
+            btns_inner,
+            text="🧪  Página de Prueba",
+            fg_color=C["bg_dark"],
+            hover_color=C["bg_light"],
+            text_color=C["text_2"],
+            font=fuente(12),
+            height=40,
+            width=160,
+            border_color=C["border"],
+            border_width=1,
             command=self._test_impresora,
         ).pack(side="left", padx=5)
 
         # Contenido scrollable principal
         scroll = ctk.CTkScrollableFrame(
-            parent, fg_color="transparent", scrollbar_fg_color=C["bg_light"])
+            parent, fg_color="transparent", scrollbar_fg_color=C["bg_light"]
+        )
         scroll.pack(fill="both", expand=True, padx=4, pady=4)
 
         # ── Ticketera activa ──────────────────────────────────────────────────
         self._seccion(scroll, "Ticketera Activa")
 
         self._card_activa = ctk.CTkFrame(
-            scroll, fg_color=C["bg_dark"], corner_radius=10,
-            border_color=C["green"], border_width=2)
+            scroll, fg_color=C["bg_dark"], corner_radius=10, border_color=C["green"], border_width=2
+        )
         self._card_activa.pack(fill="x", padx=4, pady=(0, 4))
 
         fila_act = ctk.CTkFrame(self._card_activa, fg_color="transparent")
@@ -416,22 +468,31 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._lbl_imp_activa = ctk.CTkLabel(
             fila_act,
             text=f"🖨️  {nombre_mostrar}",
-            font=fuente(14, bold=True), text_color=C["green"], anchor="w",
+            font=fuente(14, bold=True),
+            text_color=C["green"],
+            anchor="w",
         )
         self._lbl_imp_activa.pack(side="left", fill="x", expand=True)
 
         # Botón de reparación: se muestra/oculta dinámicamente según el estado.
         self._btn_reparar = ctk.CTkButton(
-            fila_act, text="🔧 Reparar USB",
-            fg_color="#ea580c", hover_color="#c2410c",
-            text_color="white", font=fuente(11, bold=True), height=26, width=100,
+            fila_act,
+            text="🔧 Reparar USB",
+            fg_color="#ea580c",
+            hover_color="#c2410c",
+            text_color="white",
+            font=fuente(11, bold=True),
+            height=26,
+            width=100,
             command=self._reparar_impresora,
         )
         # El pack de este botón lo gestiona _actualizar_estado_badge.
 
         self._lbl_estado_imp = ctk.CTkLabel(
-            self._card_activa, text="Verificando estado...",
-            font=fuente(11), text_color=C["text_3"],
+            self._card_activa,
+            text="Verificando estado...",
+            font=fuente(11),
+            text_color=C["text_3"],
         )
         self._lbl_estado_imp.pack(anchor="w", padx=12, pady=(2, 8))
 
@@ -445,20 +506,29 @@ class PanelConfiguracion(ctk.CTkFrame):
                 "⭐ = driver Generic/Text Only (ideal ESC/POS)  •  "
                 "🔄 = cambiar driver a Generic (requiere Admin)"
             ),
-            font=fuente(11), text_color=C["text_3"], justify="left",
+            font=fuente(11),
+            text_color=C["text_3"],
+            justify="left",
         ).pack(anchor="w", padx=10, pady=(0, 6))
 
         lista_border = ctk.CTkFrame(
-            scroll, fg_color=C["bg_dark"],
-            corner_radius=12, border_color=C["border"], border_width=1)
+            scroll,
+            fg_color=C["bg_dark"],
+            corner_radius=12,
+            border_color=C["border"],
+            border_width=1,
+        )
         lista_border.pack(fill="x", padx=4, pady=(0, 8))
 
         self._frame_lista = ctk.CTkScrollableFrame(
-            lista_border, fg_color="transparent", corner_radius=10, height=200)
+            lista_border, fg_color="transparent", corner_radius=10, height=200
+        )
         self._frame_lista.pack(fill="x", padx=2, pady=2)
         ctk.CTkLabel(
-            self._frame_lista, text="🔄  Cargando impresoras...",
-            font=fuente(12), text_color=C["text_3"],
+            self._frame_lista,
+            text="🔄  Cargando impresoras...",
+            font=fuente(12),
+            text_color=C["text_3"],
         ).pack(pady=20)
 
         # ── Hardware USB sin driver ───────────────────────────────────────────
@@ -467,28 +537,39 @@ class PanelConfiguracion(ctk.CTkFrame):
         ctk.CTkLabel(
             scroll,
             text="Si tu ticketera aparece aquí, instala el driver para poder seleccionarla.",
-            font=fuente(11), text_color=C["text_3"],
+            font=fuente(11),
+            text_color=C["text_3"],
         ).pack(anchor="w", padx=10, pady=(0, 6))
 
         hw_border = ctk.CTkFrame(
-            scroll, fg_color=C["bg_dark"],
-            corner_radius=12, border_color=C["border"], border_width=1)
+            scroll,
+            fg_color=C["bg_dark"],
+            corner_radius=12,
+            border_color=C["border"],
+            border_width=1,
+        )
         hw_border.pack(fill="x", padx=4, pady=(0, 8))
 
         self._frame_hw = ctk.CTkScrollableFrame(
-            hw_border, fg_color="transparent", corner_radius=10, height=110)
+            hw_border, fg_color="transparent", corner_radius=10, height=110
+        )
         self._frame_hw.pack(fill="x", padx=2, pady=2)
         ctk.CTkLabel(
-            self._frame_hw, text="Presiona 🔄 Actualizar para detectar hardware",
-            font=fuente(11), text_color=C["text_3"],
+            self._frame_hw,
+            text="Presiona 🔄 Actualizar para detectar hardware",
+            font=fuente(11),
+            text_color=C["text_3"],
         ).pack(pady=14)
 
         # ── Log de actividad ──────────────────────────────────────────────────
         self._seccion(scroll, "Registro de Actividad")
 
         self._txt_log = ctk.CTkTextbox(
-            scroll, fg_color=C["bg_dark"], text_color=C["text_2"],
-            height=60, font=ctk.CTkFont("Courier", 10),
+            scroll,
+            fg_color=C["bg_dark"],
+            text_color=C["text_2"],
+            height=60,
+            font=ctk.CTkFont("Courier", 10),
         )
         self._txt_log.pack(fill="x", padx=4, pady=(0, 4))
         self._log("Sistema listo. Presiona 🔄 Actualizar para ver las impresoras.")
@@ -512,7 +593,7 @@ class PanelConfiguracion(ctk.CTkFrame):
         """
         Actualiza el badge visual de la ticketera activa con el estado dado.
         Si no se pasa 'estado', usa el último conocido por main via _get_estado_imp.
-        No ejecuta ninguna consulta WMIC — ese trabajo lo hace main.py.
+        No ejecuta ninguna consulta WMIC; ese trabajo lo hace la aplicación.
         Solo debe llamarse desde el hilo principal de Tkinter.
         """
         if not self.winfo_exists():
@@ -526,27 +607,27 @@ class PanelConfiguracion(ctk.CTkFrame):
             )
 
         nivel = estado.get("nivel", "offline")
-        msg   = estado.get("mensaje", "Sin información")
+        msg = estado.get("mensaje", "Sin información")
 
         if nivel == "ok":
-            color_borde  = C["green"]
-            color_txt    = C["green"]
+            color_borde = C["green"]
+            color_txt = C["green"]
             color_titulo = C["green"]
             self._btn_reparar.pack_forget()
         elif nivel == "warning":
-            color_borde  = C["yellow"]
-            color_txt    = C["yellow"]
+            color_borde = C["yellow"]
+            color_txt = C["yellow"]
             color_titulo = C["text_1"]
             self._btn_reparar.pack_forget()
         elif nivel == "error":
-            color_borde  = C["red"]
-            color_txt    = C["red"]
+            color_borde = C["red"]
+            color_txt = C["red"]
             color_titulo = C["text_1"]
             self._log(f"⚠ Error detectado: {msg}")
             self._btn_reparar.pack(side="left")
         else:  # offline
-            color_borde  = C["red"]
-            color_txt    = C["red"]
+            color_borde = C["red"]
+            color_txt = C["red"]
             color_titulo = C["text_3"]
             self._btn_reparar.pack(side="left")
 
@@ -563,7 +644,7 @@ class PanelConfiguracion(ctk.CTkFrame):
                 text_color=color_titulo,
             )
         except Exception:
-            pass
+            logger.debug("El panel de impresora ya no está disponible", exc_info=True)
 
     # ─── Selección de impresora ───────────────────────────────────────────────
 
@@ -571,8 +652,7 @@ class PanelConfiguracion(ctk.CTkFrame):
         """Guarda la impresora seleccionada, actualiza la UI y recarga la lista."""
         self._imp_seleccionada = nombre
         self.config.set("impresora", "nombre", nombre)
-        from printer import Printer
-        self.printer = Printer(nombre)
+        self.printer = self._printer_factory(nombre)
         self._log(f"✅ Impresora seleccionada: {nombre}")
         self._lbl_imp_activa.configure(text=f"🖨️  {nombre}")
         # Mostrar "Verificando..." hasta que main empuje el estado real (~5 s).
@@ -599,15 +679,19 @@ class PanelConfiguracion(ctk.CTkFrame):
         for w in self._frame_lista.winfo_children():
             w.destroy()
         ctk.CTkLabel(
-            self._frame_lista, text="🔄  Escaneando...",
-            font=fuente(12), text_color=C["yellow"],
+            self._frame_lista,
+            text="🔄  Escaneando...",
+            font=fuente(12),
+            text_color=C["yellow"],
         ).pack(pady=20)
 
         for w in self._frame_hw.winfo_children():
             w.destroy()
         ctk.CTkLabel(
-            self._frame_hw, text="🔄  Escaneando hardware...",
-            font=fuente(11), text_color=C["yellow"],
+            self._frame_hw,
+            text="🔄  Escaneando hardware...",
+            font=fuente(11),
+            text_color=C["yellow"],
         ).pack(pady=14)
 
         self._log("Buscando impresoras instaladas y hardware USB...")
@@ -623,13 +707,13 @@ class PanelConfiguracion(ctk.CTkFrame):
         El scan_id se propaga para que _mostrar_resultados pueda
         descartar resultados de escaneos ya superados.
         """
-        inst       = PrinterInstaller(self._imp_seleccionada)
+        inst = self._installer_factory(self._imp_seleccionada)
         impresoras = inst.listar_impresoras_detalle()
-        hardware   = inst.listar_hardware_sin_driver()
+        hardware = inst.listar_hardware_sin_driver()
         # Siempre se vuelve al hilo principal para tocar la UI.
         self.after(0, lambda: self._mostrar_resultados(impresoras, hardware, scan_id))
 
-    def _mostrar_resultados(self, impresoras: List[Dict], hardware: List[Dict], scan_id: int):
+    def _mostrar_resultados(self, impresoras: list[dict], hardware: list[dict], scan_id: int):
         """
         Renderiza los resultados del escaneo en la UI.
         Retorna silenciosamente si el widget ya no existe o si este
@@ -653,15 +737,15 @@ class PanelConfiguracion(ctk.CTkFrame):
                     "❌  No se encontraron impresoras instaladas en Windows.\n"
                     "Instala una impresora con driver Generic/Text Only primero."
                 ),
-                font=fuente(11), text_color=C["red"],
+                font=fuente(11),
+                text_color=C["red"],
             ).pack(pady=20)
         else:
             for imp in impresoras:
                 self._render_imp_card(imp)
 
         self._log(
-            f"Encontradas: {len(impresoras)} impresoras, "
-            f"{len(hardware)} dispositivo(s) sin driver."
+            f"Encontradas: {len(impresoras)} impresoras, {len(hardware)} dispositivo(s) sin driver."
         )
 
         # ── Renderizar hardware sin driver ────────────────────────────────────
@@ -672,7 +756,8 @@ class PanelConfiguracion(ctk.CTkFrame):
             ctk.CTkLabel(
                 self._frame_hw,
                 text="✓  No hay hardware sin driver pendiente",
-                font=fuente(11), text_color=C["text_3"],
+                font=fuente(11),
+                text_color=C["text_3"],
             ).pack(pady=14)
         else:
             for dev in hardware:
@@ -681,22 +766,26 @@ class PanelConfiguracion(ctk.CTkFrame):
         # Refrescar badge con el estado actual conocido (sin nueva llamada WMIC).
         self._actualizar_estado_badge()
 
-    def _render_imp_card(self, imp: Dict):
+    def _render_imp_card(self, imp: dict):
         """Tarjeta para cada impresora instalada en la lista."""
-        nombre    = imp["nombre"]
-        driver    = imp["driver"]
-        puerto    = imp["puerto"]
+        nombre = imp["nombre"]
+        driver = imp["driver"]
+        puerto = imp["puerto"]
         es_compat = imp["es_compatible_termica"]
         es_ticket = imp["es_ticketera"]
-        es_activa = (nombre == self._imp_seleccionada)
+        es_activa = nombre == self._imp_seleccionada
 
         border_color = C["green"] if es_activa else (C["blue"] if es_compat else C["border"])
-        border_w     = 2 if (es_activa or es_compat) else 1
-        bg_card      = C["bg_medium"] if es_compat else C["bg_dark"]
+        border_w = 2 if (es_activa or es_compat) else 1
+        bg_card = C["bg_medium"] if es_compat else C["bg_dark"]
 
         card = ctk.CTkFrame(
-            self._frame_lista, fg_color=bg_card, corner_radius=10,
-            border_color=border_color, border_width=border_w)
+            self._frame_lista,
+            fg_color=bg_card,
+            corner_radius=10,
+            border_color=border_color,
+            border_width=border_w,
+        )
         card.pack(fill="x", padx=8, pady=4)
 
         left = ctk.CTkFrame(card, fg_color="transparent")
@@ -707,28 +796,42 @@ class PanelConfiguracion(ctk.CTkFrame):
 
         name_color = C["green"] if es_activa else C["text_1"]
         ctk.CTkLabel(
-            top_row, text=f"🖨️  {nombre}",
-            font=fuente(13, bold=True), text_color=name_color, anchor="w",
+            top_row,
+            text=f"🖨️  {nombre}",
+            font=fuente(13, bold=True),
+            text_color=name_color,
+            anchor="w",
         ).pack(side="left")
 
         if es_compat:
             ctk.CTkLabel(
-                top_row, text="⭐ Recomendada",
+                top_row,
+                text="⭐ Recomendada",
                 font=fuente(9, bold=True),
-                fg_color=C["blue"], text_color="white",
-                corner_radius=8, width=100, height=20,
+                fg_color=C["blue"],
+                text_color="white",
+                corner_radius=8,
+                width=100,
+                height=20,
             ).pack(side="left", padx=(10, 0))
         elif es_ticket:
             ctk.CTkLabel(
-                top_row, text="⚠ Driver propio",
+                top_row,
+                text="⚠ Driver propio",
                 font=fuente(9, bold=True),
-                fg_color=C["yellow_h"], text_color="white",
-                corner_radius=8, width=100, height=20,
+                fg_color=C["yellow_h"],
+                text_color="white",
+                corner_radius=8,
+                width=100,
+                height=20,
             ).pack(side="left", padx=(10, 0))
 
         ctk.CTkLabel(
-            left, text=f"Driver: {driver}   •   Puerto: {puerto}",
-            font=fuente(10), text_color=C["text_3"], anchor="w",
+            left,
+            text=f"Driver: {driver}   •   Puerto: {puerto}",
+            font=fuente(10),
+            text_color=C["text_3"],
+            anchor="w",
         ).pack(fill="x", pady=(2, 0))
 
         right = ctk.CTkFrame(card, fg_color="transparent")
@@ -736,52 +839,79 @@ class PanelConfiguracion(ctk.CTkFrame):
 
         if es_activa:
             ctk.CTkLabel(
-                right, text="✓ Seleccionada",
-                font=fuente(11, bold=True), text_color=C["green"],
+                right,
+                text="✓ Seleccionada",
+                font=fuente(11, bold=True),
+                text_color=C["green"],
             ).pack()
         elif es_compat:
             ctk.CTkButton(
-                right, text="Seleccionar",
-                fg_color=C["blue"], hover_color=C["blue_h"],
-                text_color="white", font=fuente(11, bold=True),
-                width=130, height=32, corner_radius=8,
+                right,
+                text="Seleccionar",
+                fg_color=C["blue"],
+                hover_color=C["blue_h"],
+                text_color="white",
+                font=fuente(11, bold=True),
+                width=130,
+                height=32,
+                corner_radius=8,
                 command=lambda n=nombre: self._seleccionar_impresora(n),
             ).pack()
         else:
             ctk.CTkButton(
-                right, text="🔧 Cambiar Driver\n(Admin)",
-                fg_color="#7c2d12", hover_color="#9a3412",
-                text_color="white", font=fuente(10, bold=True),
-                width=130, height=42, corner_radius=8,
+                right,
+                text="🔧 Cambiar Driver\n(Admin)",
+                fg_color="#7c2d12",
+                hover_color="#9a3412",
+                text_color="white",
+                font=fuente(10, bold=True),
+                width=130,
+                height=42,
+                corner_radius=8,
                 command=lambda n=nombre: self._cambiar_driver_generico(n),
             ).pack()
 
-    def _render_hw_card(self, dev: Dict):
+    def _render_hw_card(self, dev: dict):
         """Tarjeta para hardware USB detectado sin driver instalado."""
         nombre = dev.get("nombre", "Desconocido")
 
         card = ctk.CTkFrame(
-            self._frame_hw, fg_color=C["bg_medium"], corner_radius=8,
-            border_color=C["yellow"], border_width=1)
+            self._frame_hw,
+            fg_color=C["bg_medium"],
+            corner_radius=8,
+            border_color=C["yellow"],
+            border_width=1,
+        )
         card.pack(fill="x", padx=8, pady=4)
 
         left = ctk.CTkFrame(card, fg_color="transparent")
         left.pack(side="left", fill="x", expand=True, padx=14, pady=10)
 
         ctk.CTkLabel(
-            left, text=f"🖨️  {nombre}",
-            font=fuente(12, bold=True), text_color=C["yellow"], anchor="w",
+            left,
+            text=f"🖨️  {nombre}",
+            font=fuente(12, bold=True),
+            text_color=C["yellow"],
+            anchor="w",
         ).pack(fill="x")
         ctk.CTkLabel(
-            left, text="Sin driver — necesita instalación",
-            font=fuente(10), text_color=C["text_3"], anchor="w",
+            left,
+            text="Sin driver — necesita instalación",
+            font=fuente(10),
+            text_color=C["text_3"],
+            anchor="w",
         ).pack(fill="x")
 
         ctk.CTkButton(
-            card, text="🛡️ Instalar\n(Admin)",
-            fg_color="#ea580c", hover_color="#c2410c",
-            text_color="white", font=fuente(10, bold=True),
-            width=110, height=42, corner_radius=8,
+            card,
+            text="🛡️ Instalar\n(Admin)",
+            fg_color="#ea580c",
+            hover_color="#c2410c",
+            text_color="white",
+            font=fuente(10, bold=True),
+            width=110,
+            height=42,
+            corner_radius=8,
             command=lambda n=nombre: self._instalar_driver_admin(n),
         ).pack(side="right", padx=14, pady=10)
 
@@ -807,7 +937,7 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._log(f"Iniciando cambio de driver para: {nombre_impresora}...")
 
         def _run():
-            inst  = PrinterInstaller(nombre_impresora)
+            inst = self._installer_factory(nombre_impresora)
             exito = inst.cambiar_driver_generico(
                 nombre_impresora,
                 log=lambda m: self.after(0, self._log, m),
@@ -817,7 +947,9 @@ class PanelConfiguracion(ctk.CTkFrame):
                 if not self.winfo_exists():
                     return
                 if exito:
-                    self._log(f"✅ Driver cambiado. '{nombre_impresora}' ahora usa Generic/Text Only.")
+                    self._log(
+                        f"✅ Driver cambiado. '{nombre_impresora}' ahora usa Generic/Text Only."
+                    )
                     messagebox.showinfo(
                         "Driver Actualizado",
                         f"'{nombre_impresora}' ahora usa Generic / Text Only.\n"
@@ -858,10 +990,8 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._log(f"Iniciando instalación como Admin para: {nombre_modelo}...")
 
         def _run():
-            inst = PrinterInstaller(nombre_modelo)
-            puerto_detectado = inst.detectar_puerto(
-                log=lambda m: self.after(0, self._log, m)
-            )
+            inst = self._installer_factory(nombre_modelo)
+            puerto_detectado = inst.detectar_puerto(log=lambda m: self.after(0, self._log, m))
             exito = inst.instalar_como_admin(
                 nombre_modelo,
                 puerto=puerto_detectado,
@@ -877,8 +1007,7 @@ class PanelConfiguracion(ctk.CTkFrame):
                     self._imp_seleccionada = nombre_modelo
                     self._lbl_imp_activa.configure(text=f"🖨️  {nombre_modelo}")
                     messagebox.showinfo(
-                        "Éxito",
-                        f"¡'{nombre_modelo}' instalada y seleccionada como ticketera!"
+                        "Éxito", f"¡'{nombre_modelo}' instalada y seleccionada como ticketera!"
                     )
                     self._escanear()
                     if self.on_guardado:
@@ -906,7 +1035,7 @@ class PanelConfiguracion(ctk.CTkFrame):
         La llamada bloqueante se ejecuta en un hilo daemon para no
         congelar la UI; el resultado se muestra desde el hilo principal.
         """
-        inst = PrinterInstaller(self._imp_seleccionada)
+        inst = self._installer_factory(self._imp_seleccionada)
         threading.Thread(
             target=lambda: self.after(
                 0, self._mostrar_resultado_test, *inst.imprimir_pagina_prueba()
@@ -939,7 +1068,7 @@ class PanelConfiguracion(ctk.CTkFrame):
         self._log("Iniciando reparación automática de conexión USB...")
 
         def _run():
-            inst  = PrinterInstaller(self._imp_seleccionada)
+            inst = self._installer_factory(self._imp_seleccionada)
             exito = inst.reparar_conexion_admin(log=lambda m: self.after(0, self._log, m))
 
             def _ui():
@@ -967,23 +1096,36 @@ class PanelConfiguracion(ctk.CTkFrame):
         f = ctk.CTkFrame(parent, fg_color="transparent")
         f.pack(fill="x", padx=4, pady=(16, 4))
         ctk.CTkLabel(
-            f, text=titulo, font=fuente(13, bold=True),
-            text_color=C["text_2"], anchor="w",
+            f,
+            text=titulo,
+            font=fuente(13, bold=True),
+            text_color=C["text_2"],
+            anchor="w",
         ).pack(side="left")
         ctk.CTkFrame(f, fg_color=C["border"], height=1).pack(
-            side="left", fill="x", expand=True, padx=(10, 0), pady=6)
+            side="left", fill="x", expand=True, padx=(10, 0), pady=6
+        )
 
     def _campo_entrada(self, parent, label: str, valor: str = "") -> ctk.CTkEntry:
         """Fila etiqueta + campo de texto para los formularios de texto libre."""
         fila = ctk.CTkFrame(parent, fg_color="transparent")
         fila.pack(fill="x", padx=4, pady=4)
         ctk.CTkLabel(
-            fila, text=label, font=fuente(12), text_color=C["text_2"],
-            width=280, anchor="w",
+            fila,
+            text=label,
+            font=fuente(12),
+            text_color=C["text_2"],
+            width=280,
+            anchor="w",
         ).pack(side="left")
         entry = ctk.CTkEntry(
-            fila, fg_color=C["bg_dark"], border_color=C["border"],
-            text_color=C["text_1"], height=36, width=280)
+            fila,
+            fg_color=C["bg_dark"],
+            border_color=C["border"],
+            text_color=C["text_1"],
+            height=36,
+            width=280,
+        )
         entry.insert(0, valor)
         entry.pack(side="right")
         return entry
@@ -1004,4 +1146,4 @@ class PanelConfiguracion(ctk.CTkFrame):
             self._txt_log.see("end")
             self._txt_log.configure(state="disabled")
         except Exception:
-            pass
+            logger.debug("El panel de registro ya no está disponible", exc_info=True)

@@ -16,40 +16,23 @@ Threading:
     winfo_exists() para evitar TclError si la ventana fue cerrada.
   • La conexión SQLite del hilo se cierra explícitamente en el finally.
 """
-import math
+
+import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
+from datetime import datetime
 
 import customtkinter as ctk
-from datetime import datetime
-from typing import Dict, Callable, Optional
 
-from ui.theme import C, fuente, color_tipo, hover_tipo, emoji_tipo, TIPO_POR_NOMBRE
+from parkingpro.domain import calculate_amount as calcular_monto
+from parkingpro.domain import format_duration as formatear_tiempo
+from parkingpro.presentation.theme import C, color_tipo, emoji_tipo, fuente, hover_tipo
 
-
-# ─── Funciones auxiliares ─────────────────────────────────────────────────────
-
-def calcular_monto(minutos: int, tarifa_hora: float, tiempo_libre: int = 0) -> float:
-    """
-    Calcula el monto a cobrar.
-    Aplica el tiempo libre como periodo de gracia; si el tiempo total no
-    supera ese umbral, el cobro es cero.
-    Pasado el umbral, se cobra por horas iniciadas sobre los minutos restantes.
-    """
-    if minutos <= tiempo_libre:
-        return 0.0
-    minutos_cobrables = minutos - tiempo_libre
-    horas = math.ceil(minutos_cobrables / 60)
-    return round(horas * tarifa_hora, 2)
-
-
-def formatear_tiempo(minutos: int) -> str:
-    """Convierte minutos a cadena legible: '1h 05min' o '45min'."""
-    h = minutos // 60
-    m = minutos % 60
-    return f"{h}h {m:02d}min" if h > 0 else f"{m}min"
-
+logger = logging.getLogger(__name__)
 
 # ─── Modal ────────────────────────────────────────────────────────────────────
+
 
 class ModalCobro(ctk.CTkToplevel):
     """Ventana modal para registrar el cobro de una sesión activa."""
@@ -57,17 +40,17 @@ class ModalCobro(ctk.CTkToplevel):
     def __init__(
         self,
         parent,
-        sesion: Dict,
+        sesion: dict,
         config,
-        db,
+        parking_service,
         printer,
-        on_cobro_exitoso: Optional[Callable[[Dict], None]] = None,
+        on_cobro_exitoso: Callable[[dict], None] | None = None,
     ):
         super().__init__(parent)
-        self.sesion           = sesion
-        self.config           = config
-        self.db               = db
-        self.printer          = printer
+        self.sesion = sesion
+        self.config = config
+        self.parking_service = parking_service
+        self.printer = printer
         self.on_cobro_exitoso = on_cobro_exitoso
 
         # Un único hilo para la operación de cobro + impresión
@@ -86,13 +69,13 @@ class ModalCobro(ctk.CTkToplevel):
         self._modal_h = max(580, min(860, int(_sh * 0.88)))
 
         # ── Preparar tiempos: congelar segundos para que UI y BD coincidan ───
-        self._entrada_dt     = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
+        self._entrada_dt = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
         self._entrada_limpia = self._entrada_dt.replace(second=0, microsecond=0)
         self._actualizar_reloj_interno()
 
         # ── Pre-calcular valores de tarifa y monto ───────────────────────────
-        self._tarifa     = config.get_tarifa(sesion["tipo_vehiculo"])
-        self._tl         = config.get_tiempo_libre()
+        self._tarifa = config.get_tarifa(sesion["tipo_vehiculo"])
+        self._tl = config.get_tiempo_libre()
         self._monto_base = calcular_monto(self._minutos, self._tarifa, self._tl)
 
         # Colores temáticos del tipo de vehículo
@@ -105,13 +88,13 @@ class ModalCobro(ctk.CTkToplevel):
         self.geometry(f"{self._modal_w}x{self._modal_h}")
         self.resizable(False, False)
         self.configure(fg_color=C["bg_dark"])
-        self.grab_set()   # Bloquea la ventana padre mientras este modal está abierto
+        self.grab_set()  # Bloquea la ventana padre mientras este modal está abierto
         self.lift()
         self.focus_force()
 
         # Centrar el modal sobre la ventana padre
         self.update_idletasks()
-        px = parent.winfo_x() + (parent.winfo_width()  - self._modal_w) // 2
+        px = parent.winfo_x() + (parent.winfo_width() - self._modal_w) // 2
         py = parent.winfo_y() + (parent.winfo_height() - self._modal_h) // 2
         self.geometry(f"{self._modal_w}x{self._modal_h}+{max(0, px)}+{max(0, py)}")
 
@@ -146,7 +129,7 @@ class ModalCobro(ctk.CTkToplevel):
         transcurridos. Mantiene UI y ticket perfectamente sincronizados.
         """
         ahora = datetime.now().replace(second=0, microsecond=0)
-        self._hora_salida_str     = ahora.strftime("%Y-%m-%d %H:%M:%S")
+        self._hora_salida_str = ahora.strftime("%Y-%m-%d %H:%M:%S")
         self._hora_salida_display = ahora.strftime("%d/%m/%Y  %I:%M %p")
         self._minutos = max(1, int((ahora - self._entrada_limpia).total_seconds() / 60))
 
@@ -161,13 +144,15 @@ class ModalCobro(ctk.CTkToplevel):
         ctk.CTkLabel(
             hdr,
             text=f"{self._emoji}  COBRO DE TICKET",
-            font=fuente(20, bold=True), text_color="white",
+            font=fuente(20, bold=True),
+            text_color="white",
         ).place(relx=0.5, rely=0.40, anchor="center")
 
         ctk.CTkLabel(
             hdr,
             text=f"Ticket: {self.sesion['ticket_numero']}",
-            font=fuente(11), text_color="#c8daf5",
+            font=fuente(11),
+            text_color="#c8daf5",
         ).place(relx=0.5, rely=0.78, anchor="center")
 
         body = ctk.CTkFrame(self, fg_color=C["bg_medium"], corner_radius=0)
@@ -178,8 +163,11 @@ class ModalCobro(ctk.CTkToplevel):
         card_veh.pack(fill="x", padx=24, pady=(18, 0))
         self._fila(card_veh, "🚘  Vehículo", f"{self._emoji}  {self.sesion['tipo_vehiculo']}")
         self._fila(
-            card_veh, "🔑  Placa", self.sesion["placa"],
-            bold_valor=True, color_valor=self._color,
+            card_veh,
+            "🔑  Placa",
+            self.sesion["placa"],
+            bold_valor=True,
+            color_valor=self._color,
         )
 
         # ── Tarjeta: Tiempos ──────────────────────────────────────────────────
@@ -190,33 +178,46 @@ class ModalCobro(ctk.CTkToplevel):
         # Estos dos labels se actualizan cada 30 s por _tick()
         self._lbl_salida = self._fila(card_tiempo, "🕐  Salida", self._hora_salida_display)
         self._lbl_tiempo = self._fila(
-            card_tiempo, "⏱️  Tiempo total",
-            formatear_tiempo(self._minutos), bold_valor=True,
+            card_tiempo,
+            "⏱️  Tiempo total",
+            formatear_tiempo(self._minutos),
+            bold_valor=True,
         )
 
         if self._tl > 0:
             self._fila(card_tiempo, "🎁  Tiempo libre", f"{self._tl} min (tolerancia)")
 
-        self._fila(card_tiempo, "💰  Tarifa", f"{self.config.get_moneda()} {self._tarifa:.2f} / hora")
+        self._fila(
+            card_tiempo,
+            "💰  Tarifa",
+            f"{self.config.get_moneda()} {self._tarifa:.2f} / hora",
+        )
 
         # ── Tarjeta: Monto a cobrar ───────────────────────────────────────────
         card_monto = ctk.CTkFrame(
-            body, fg_color=C["kpi_bg"], corner_radius=12,
-            border_color=self._color, border_width=2,
+            body,
+            fg_color=C["kpi_bg"],
+            corner_radius=12,
+            border_color=self._color,
+            border_width=2,
         )
         card_monto.pack(fill="x", padx=24)
 
         ctk.CTkLabel(
-            card_monto, text="TOTAL A COBRAR",
-            font=fuente(11), text_color=C["text_3"],
+            card_monto,
+            text="TOTAL A COBRAR",
+            font=fuente(11),
+            text_color=C["text_3"],
         ).pack(pady=(14, 2))
 
         fila_monto = ctk.CTkFrame(card_monto, fg_color="transparent")
         fila_monto.pack(pady=(0, 6))
 
         ctk.CTkLabel(
-            fila_monto, text=self.config.get_moneda(),
-            font=fuente(22, bold=True), text_color=C["text_2"],
+            fila_monto,
+            text=self.config.get_moneda(),
+            font=fuente(22, bold=True),
+            text_color=C["text_2"],
         ).pack(side="left")
 
         # StringVar con trace para filtrar caracteres no numéricos en tiempo real
@@ -226,26 +227,33 @@ class ModalCobro(ctk.CTkToplevel):
         self._entry_monto = ctk.CTkEntry(
             fila_monto,
             textvariable=self._var_monto,
-            font=fuente(34, bold=True), text_color=self._color,
-            fg_color="transparent", border_width=0,
-            width=160, justify="center",
+            font=fuente(34, bold=True),
+            text_color=self._color,
+            fg_color="transparent",
+            border_width=0,
+            width=160,
+            justify="center",
         )
         self._entry_monto.pack(side="left")
 
         ctk.CTkLabel(
             card_monto,
             text="Edita el monto si necesitas hacer un ajuste manual",
-            font=fuente(10), text_color=C["text_3"],
+            font=fuente(10),
+            text_color=C["text_3"],
         ).pack(pady=(0, 12))
 
         # ── Checkbox de impresión ─────────────────────────────────────────────
         self._var_imprimir = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
-            body, text="Imprimir ticket de salida",
+            body,
+            text="Imprimir ticket de salida",
             variable=self._var_imprimir,
-            fg_color=self._color, hover_color=self._hover,
+            fg_color=self._color,
+            hover_color=self._hover,
             checkmark_color="white",
-            text_color=C["text_2"], font=fuente(12),
+            text_color=C["text_2"],
+            font=fuente(12),
         ).pack(pady=(14, 0))
 
         # ── Botones ───────────────────────────────────────────────────────────
@@ -253,17 +261,25 @@ class ModalCobro(ctk.CTkToplevel):
         frame_btns.pack(fill="x", padx=24, pady=14)
 
         ctk.CTkButton(
-            frame_btns, text="✕  Cancelar",
-            fg_color=C["bg_light"], hover_color=C["border"],
-            text_color=C["text_2"], width=180, height=44,
+            frame_btns,
+            text="✕  Cancelar",
+            fg_color=C["bg_light"],
+            hover_color=C["border"],
+            text_color=C["text_2"],
+            width=180,
+            height=44,
             command=self._cancelar,
         ).pack(side="left", padx=(0, 8))
 
         self._btn_cobrar = ctk.CTkButton(
-            frame_btns, text="✓  Confirmar Cobro",
-            fg_color=self._color, hover_color=self._hover,
-            text_color="white", font=fuente(14, bold=True),
-            width=240, height=44,
+            frame_btns,
+            text="✓  Confirmar Cobro",
+            fg_color=self._color,
+            hover_color=self._hover,
+            text_color="white",
+            font=fuente(14, bold=True),
+            width=240,
+            height=44,
             command=self._confirmar,
         )
         self._btn_cobrar.pack(side="right")
@@ -273,19 +289,27 @@ class ModalCobro(ctk.CTkToplevel):
         self._lbl_error.pack()
 
     def _fila(
-        self, parent, label: str, valor: str,
-        bold_valor: bool = False, color_valor: str = None,
+        self,
+        parent,
+        label: str,
+        valor: str,
+        bold_valor: bool = False,
+        color_valor: str = None,
     ) -> ctk.CTkLabel:
         """Crea una fila etiqueta-valor dentro de una tarjeta y devuelve el label de valor."""
         frame = ctk.CTkFrame(parent, fg_color="transparent")
         frame.pack(fill="x", padx=16, pady=5)
         ctk.CTkLabel(
-            frame, text=label,
-            font=fuente(12), text_color=C["text_3"],
-            width=160, anchor="w",
+            frame,
+            text=label,
+            font=fuente(12),
+            text_color=C["text_3"],
+            width=160,
+            anchor="w",
         ).pack(side="left")
         lbl = ctk.CTkLabel(
-            frame, text=valor,
+            frame,
+            text=valor,
             font=fuente(12, bold=bold_valor),
             text_color=color_valor or C["text_1"],
             anchor="e",
@@ -307,13 +331,13 @@ class ModalCobro(ctk.CTkToplevel):
             return
         self._sanitizando_monto = True
         try:
-            raw  = self._var_monto.get()
+            raw = self._var_monto.get()
             limpio = ""
             punto_visto = False
             for ch in raw:
                 if ch.isdigit():
                     limpio += ch
-                elif ch == '.' and not punto_visto:
+                elif ch == "." and not punto_visto:
                     limpio += ch
                     punto_visto = True
                 # Cualquier otro carácter (letras, comas, signos) se descarta
@@ -345,10 +369,8 @@ class ModalCobro(ctk.CTkToplevel):
 
                 # Actualizar el monto solo si el operador no lo modificó manualmente
                 monto_actual = None
-                try:
+                with suppress(ValueError):
                     monto_actual = float(self._var_monto.get())
-                except ValueError:
-                    pass  # El campo tiene texto inválido temporal; no tocar
 
                 if monto_actual is not None:
                     monto_nuevo = calcular_monto(self._minutos, self._tarifa, self._tl)
@@ -358,8 +380,7 @@ class ModalCobro(ctk.CTkToplevel):
                         self._var_monto.set(f"{monto_nuevo:.2f}")
 
             except Exception:
-                # Error al actualizar la pantalla: ignorar para no cortar el ciclo
-                pass
+                logger.debug("No se pudo actualizar el modal de cobro", exc_info=True)
 
         # El after() siempre se agenda, independientemente de cualquier error anterior
         self.after(30_000, self._tick)
@@ -398,9 +419,7 @@ class ModalCobro(ctk.CTkToplevel):
         imprimir = self._var_imprimir.get()
 
         # ── Verificar estado de la impresora ──────────────────────────────────
-        eleccion = self.printer.verificar_estado_para_proceder(
-            self, impresion_solicitada=imprimir
-        )
+        eleccion = self.printer.verificar_estado_para_proceder(self, impresion_solicitada=imprimir)
         if eleccion == "intentar":
             # Abortar: el operador fue a revisar la impresora
             return
@@ -421,7 +440,7 @@ class ModalCobro(ctk.CTkToplevel):
             """Registra el cobro en BD e imprime el ticket en el hilo secundario."""
             try:
                 # Enviar hora y minutos congelados para garantizar consistencia total
-                sesion_cobrada = self.db.cobrar_sesion(
+                sesion_cobrada = self.parking_service.cobrar_sesion(
                     sesion["id"],
                     monto,
                     minutos_fijos=self._minutos,
@@ -429,10 +448,7 @@ class ModalCobro(ctk.CTkToplevel):
                 )
 
                 if "hora_salida" not in sesion_cobrada:
-                    raise ValueError(
-                        "cobrar_sesion no retornó 'hora_salida'. "
-                        "Verifique el módulo database.py."
-                    )
+                    raise ValueError("El servicio de cobro no retornó 'hora_salida'.")
 
                 if imprimir:
                     datos = self.config.get_datos_negocio()
@@ -457,20 +473,20 @@ class ModalCobro(ctk.CTkToplevel):
                     self.after(0, _ok)
 
             except Exception as e:
-                def _err():
+                error_message = str(e)
+
+                def _err(message=error_message):
                     # Restaurar la UI para que el operador pueda reintentar
                     self._procesando = False
                     if self.winfo_exists():
-                        self._btn_cobrar.configure(
-                            state="normal", text="✓  Confirmar Cobro"
-                        )
-                        self._lbl_error.configure(text=f"⚠ Error: {e}")
+                        self._btn_cobrar.configure(state="normal", text="✓  Confirmar Cobro")
+                        self._lbl_error.configure(text=f"⚠ Error: {message}")
 
                 if self.winfo_exists():
                     self.after(0, _err)
 
             finally:
                 # Liberar la conexión SQLite del hilo: evita bloqueos de archivos en Windows
-                self.db.cerrar_conexion_actual()
+                self.parking_service.cerrar_conexion_actual()
 
         self._executor.submit(_worker)

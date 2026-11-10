@@ -3,15 +3,19 @@ ParkingPro - Instalador y detector de impresoras
 Detecta ticketeras instaladas y hardware USB sin driver.
 Compatible: Windows 10/11.  En Linux/Mac funciona en modo simulación.
 """
+
+import logging
 import os
 import subprocess
-import sys
-import threading
 import tempfile
+import threading
 import time
-from typing import List, Tuple, Dict, Callable, Optional
+from collections.abc import Callable
+from contextlib import suppress
 
-WINDOWS = (os.name == "nt")
+logger = logging.getLogger(__name__)
+
+WINDOWS = os.name == "nt"
 
 try:
     import win32print
@@ -20,7 +24,7 @@ except ImportError:
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
 DRIVER_NOMBRE = "Generic / Text Only"
-DRIVER_INF    = r"%windir%\inf\ntprint.inf"
+DRIVER_INF = r"%windir%\inf\ntprint.inf"
 
 # Drivers considerados compatibles con impresoras térmicas ESC/POS
 GENERIC_DRIVERS = [
@@ -33,17 +37,43 @@ GENERIC_DRIVERS = [
 
 # Palabras clave en nombre de impresora que sugieren ticketera
 _KW_TICKET = [
-    "pos", "thermal", "receipt", "ticket", "epson tm", "star bsc",
-    "xprinter", "xp-", "3nstar", "bixolon", "citizen ct", "sewoo",
-    "rongta", "gprinter", "generic text", "pos-d", "hprt", "birch",
+    "pos",
+    "thermal",
+    "receipt",
+    "ticket",
+    "epson tm",
+    "star bsc",
+    "xprinter",
+    "xp-",
+    "3nstar",
+    "bixolon",
+    "citizen ct",
+    "sewoo",
+    "rongta",
+    "gprinter",
+    "generic text",
+    "pos-d",
+    "hprt",
+    "birch",
     "esc/pos",
 ]
 
 # Basura USB que no es impresora
 _KW_BASURA = [
-    "hub", "audio", "bluetooth", "mouse", "keyboard", "teclado",
-    "cámara", "camera", "video", "generic usb", "host controller",
-    "raíz", "root", "composite",
+    "hub",
+    "audio",
+    "bluetooth",
+    "mouse",
+    "keyboard",
+    "teclado",
+    "cámara",
+    "camera",
+    "video",
+    "generic usb",
+    "host controller",
+    "raíz",
+    "root",
+    "composite",
 ]
 
 
@@ -55,7 +85,7 @@ class PrinterInstaller:
 
     # ─── Impresoras instaladas ────────────────────────────────────────────────
 
-    def listar_nombres_instalados(self) -> List[str]:
+    def listar_nombres_instalados(self) -> list[str]:
         """Devuelve los nombres de todas las impresoras instaladas en Windows."""
         if not WINDOWS or win32print is None:
             return []
@@ -68,7 +98,7 @@ class PrinterInstaller:
     def impresora_ya_instalada(self) -> bool:
         return self.nombre_impresora in self.listar_nombres_instalados()
 
-    def listar_impresoras_detalle(self) -> List[Dict]:
+    def listar_impresoras_detalle(self) -> list[dict]:
         """
         Devuelve información detallada de TODAS las impresoras instaladas.
         Cada dict: {nombre, driver, puerto, es_compatible_termica, es_ticketera}
@@ -77,27 +107,29 @@ class PrinterInstaller:
         if not WINDOWS or win32print is None:
             return []
         try:
-            flags    = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+            flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
             printers = win32print.EnumPrinters(flags, None, 2)
         except Exception:
             return []
 
         result = []
         for p in printers:
-            nombre   = p.get("pPrinterName", "")
-            driver   = p.get("pDriverName", "")
-            puerto   = p.get("pPortName", "?")
+            nombre = p.get("pPrinterName", "")
+            driver = p.get("pDriverName", "")
+            puerto = p.get("pPortName", "?")
             driver_l = driver.lower()
             nombre_l = nombre.lower()
             es_compatible = any(g in driver_l for g in GENERIC_DRIVERS)
-            es_ticketera  = es_compatible or any(k in nombre_l for k in _KW_TICKET)
-            result.append({
-                "nombre":                nombre,
-                "driver":                driver,
-                "puerto":                puerto,
-                "es_compatible_termica": es_compatible,
-                "es_ticketera":          es_ticketera,
-            })
+            es_ticketera = es_compatible or any(k in nombre_l for k in _KW_TICKET)
+            result.append(
+                {
+                    "nombre": nombre,
+                    "driver": driver,
+                    "puerto": puerto,
+                    "es_compatible_termica": es_compatible,
+                    "es_ticketera": es_ticketera,
+                }
+            )
 
         # Orden: compatibles térmicas primero, luego alphabético
         result.sort(key=lambda x: (not x["es_compatible_termica"], x["nombre"].lower()))
@@ -105,7 +137,7 @@ class PrinterInstaller:
 
     # ─── Detección de hardware USB sin driver ─────────────────────────────────
 
-    def listar_hardware_sin_driver(self) -> List[Dict]:
+    def listar_hardware_sin_driver(self) -> list[dict]:
         """
         Detecta dispositivos físicos USB de impresión que NO tienen driver instalado.
         Devuelve lista de dicts: {nombre, tipo='hw_detectado'}
@@ -113,13 +145,17 @@ class PrinterInstaller:
         if not WINDOWS:
             return []
 
-        nombres_ya  = {d.lower() for d in self.listar_nombres_instalados()}
-        encontrados: List[Dict] = []
+        nombres_ya = {d.lower() for d in self.listar_nombres_instalados()}
+        encontrados: list[dict] = []
 
         try:
-            import csv, io
+            import csv
+            import io
+
             cmd = [
-                "powershell", "-NoProfile", "-Command",
+                "powershell",
+                "-NoProfile",
+                "-Command",
                 "Get-PnpDevice -PresentOnly | "
                 "Select-Object FriendlyName, InstanceId, Class | "
                 "ConvertTo-Csv -NoTypeInformation",
@@ -145,7 +181,7 @@ class PrinterInstaller:
                     continue
                 nombre = row[0].strip()
                 dev_id = row[1].strip().upper()
-                clase  = row[2].strip().upper()
+                clase = row[2].strip().upper()
 
                 if not nombre or nombre.lower() in ("unknown", ""):
                     continue
@@ -153,18 +189,23 @@ class PrinterInstaller:
                     continue
 
                 es_imp = (
-                    "USBPRINT" in dev_id or "PRINTER" in clase or
-                    any(k in nombre.lower() for k in ["star", "bsc", "pos", "thermal", "receipt"])
+                    "USBPRINT" in dev_id
+                    or "PRINTER" in clase
+                    or any(
+                        k in nombre.lower() for k in ["star", "bsc", "pos", "thermal", "receipt"]
+                    )
                 )
 
                 if es_imp and nombre.lower() not in nombres_ya:
-                    encontrados.append({
-                        "nombre":       nombre,
-                        "tipo":         "hw_detectado",
-                        "es_ticketera": True,
-                    })
+                    encontrados.append(
+                        {
+                            "nombre": nombre,
+                            "tipo": "hw_detectado",
+                            "es_ticketera": True,
+                        }
+                    )
         except Exception:
-            pass
+            logger.debug("No se pudo consultar el hardware PnP", exc_info=True)
 
         return encontrados
 
@@ -191,8 +232,10 @@ class PrinterInstaller:
                 "$devs = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | "
                 "Where-Object { $_.InstanceId -match 'USB' }; "
                 "foreach ($d in $devs) { "
-                "  $path = 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\' + $d.InstanceId + '\\Device Parameters'; "
-                "  $p = (Get-ItemProperty -Path $path -Name 'PortName' -ErrorAction SilentlyContinue).PortName; "
+                "  $path = 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\' + $d.InstanceId "
+                "+ '\\Device Parameters'; "
+                "  $p = (Get-ItemProperty -Path $path -Name 'PortName' "
+                "-ErrorAction SilentlyContinue).PortName; "
                 "  if ($p -match '^USB\\d+') { Write-Output $p } "
                 "}"
             )
@@ -212,8 +255,7 @@ class PrinterInstaller:
             )
             # Limpiamos los resultados
             puertos_activos = [
-                line.strip() for line in res.stdout.splitlines()
-                if line.strip().startswith("USB")
+                line.strip() for line in res.stdout.splitlines() if line.strip().startswith("USB")
             ]
 
             if puertos_activos:
@@ -230,11 +272,12 @@ class PrinterInstaller:
 
         _log("➔ Usando puerto por defecto: USB001")
         return "USB001"
-  
+
     # ─── Instalación ──────────────────────────────────────────────────────────
 
-    def instalar_como_admin(self, nombre_modelo: str, puerto: str = "USB001",
-                             log: Callable = None) -> bool:
+    def instalar_como_admin(
+        self, nombre_modelo: str, puerto: str = "USB001", log: Callable = None
+    ) -> bool:
         """
         Instala driver Generic/Text Only para el hardware indicado
         solicitando permisos de Administrador via UAC.
@@ -253,17 +296,19 @@ class PrinterInstaller:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(f'Add-PrinterPort -Name "{puerto}" -ErrorAction SilentlyContinue\n')
-                f.write(f'Add-PrinterDriver -Name "{DRIVER_NOMBRE}" -ErrorAction SilentlyContinue\n')
+                f.write(
+                    f'Add-PrinterDriver -Name "{DRIVER_NOMBRE}" -ErrorAction SilentlyContinue\n'
+                )
                 f.write(
                     f'Add-Printer -Name "{nombre_modelo}" '
                     f'-DriverName "{DRIVER_NOMBRE}" -PortName "{puerto}" '
-                    f'-ErrorAction SilentlyContinue\n'
+                    f"-ErrorAction SilentlyContinue\n"
                 )
 
             _log("Solicitando permisos de Administrador (Windows UAC)...")
             _log("Acepta la ventana UAC que aparecerá en pantalla...")
 
-            ps1_safe   = ps1.replace("'", "''")
+            ps1_safe = ps1.replace("'", "''")
             launch_cmd = (
                 f"$a = @('-NoProfile','-ExecutionPolicy','Bypass','-File','{ps1_safe}');"
                 f"Start-Process powershell -ArgumentList $a -Verb RunAs -Wait"
@@ -292,12 +337,12 @@ class PrinterInstaller:
             return False
 
         finally:
+
             def _borrar():
                 time.sleep(5)
-                try:
+                with suppress(OSError):
                     os.remove(ps1)
-                except Exception:
-                    pass
+
             threading.Thread(target=_borrar, daemon=True).start()
 
     def reparar_conexion_admin(self, log: Callable = None) -> bool:
@@ -313,10 +358,10 @@ class PrinterInstaller:
                 log(m)
 
         _log(f"Buscando nuevo puerto físico para '{self.nombre_impresora}'...")
-        
+
         # 1. Usamos tu detector de alta precisión
         nuevo_puerto = self.detectar_puerto(log=log)
-        
+
         _log(f"➔ Moviendo '{self.nombre_impresora}' al puerto {nuevo_puerto}...")
 
         fd, ps1 = tempfile.mkstemp(suffix=".ps1")
@@ -326,12 +371,12 @@ class PrinterInstaller:
                 f.write(
                     f'Set-Printer -Name "{self.nombre_impresora}" '
                     f'-PortName "{nuevo_puerto}" '
-                    f'-ErrorAction Stop\n'
+                    f"-ErrorAction Stop\n"
                 )
 
             _log("Solicitando permisos de Administrador (UAC)...")
 
-            ps1_safe   = ps1.replace("'", "''")
+            ps1_safe = ps1.replace("'", "''")
             launch_cmd = (
                 f"$a = @('-NoProfile','-ExecutionPolicy','Bypass','-File','{ps1_safe}');"
                 f"Start-Process powershell -ArgumentList $a -Verb RunAs -Wait"
@@ -352,16 +397,15 @@ class PrinterInstaller:
             _log(f"❌ Error al intentar reparar: {e}")
             return False
         finally:
+
             def _borrar():
                 time.sleep(5)
-                try:
+                with suppress(OSError):
                     os.remove(ps1)
-                except Exception:
-                    pass
+
             threading.Thread(target=_borrar, daemon=True).start()
 
-    def cambiar_driver_generico(self, nombre_impresora: str,
-                                 log: Callable = None) -> bool:
+    def cambiar_driver_generico(self, nombre_impresora: str, log: Callable = None) -> bool:
         """
         Cambia el driver de una impresora ya instalada a Generic / Text Only.
         Útil para ticketeras Epson/Star/etc. que tienen su propio driver y no
@@ -385,20 +429,19 @@ class PrinterInstaller:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 # Primero aseguramos que el driver Generic esté disponible
                 f.write(
-                    f'Add-PrinterDriver -Name "{DRIVER_NOMBRE}" '
-                    f'-ErrorAction SilentlyContinue\n'
+                    f'Add-PrinterDriver -Name "{DRIVER_NOMBRE}" -ErrorAction SilentlyContinue\n'
                 )
                 # Luego cambiamos el driver de la impresora existente
                 f.write(
                     f'Set-Printer -Name "{nombre_impresora}" '
                     f'-DriverName "{DRIVER_NOMBRE}" '
-                    f'-ErrorAction Stop\n'
+                    f"-ErrorAction Stop\n"
                 )
 
             _log("Solicitando permisos de Administrador (UAC)...")
             _log("Acepta la ventana UAC que aparecerá en pantalla...")
 
-            ps1_safe   = ps1.replace("'", "''")
+            ps1_safe = ps1.replace("'", "''")
             launch_cmd = (
                 f"$a = @('-NoProfile','-ExecutionPolicy','Bypass','-File','{ps1_safe}');"
                 f"Start-Process powershell -ArgumentList $a -Verb RunAs -Wait"
@@ -434,15 +477,15 @@ class PrinterInstaller:
             return False
 
         finally:
+
             def _borrar():
                 time.sleep(5)
-                try:
+                with suppress(OSError):
                     os.remove(ps1)
-                except Exception:
-                    pass
+
             threading.Thread(target=_borrar, daemon=True).start()
 
-    def imprimir_pagina_prueba(self) -> Tuple[bool, str]:
+    def imprimir_pagina_prueba(self) -> tuple[bool, str]:
         """Envía una página de prueba a la impresora."""
         if not WINDOWS or win32print is None:
             return False, "Solo en Windows."
@@ -457,7 +500,7 @@ class PrinterInstaller:
                 win32print.EndPagePrinter(h)
                 win32print.EndDocPrinter(h)
             finally:
-                win32print.ClosePrinter(h)   # FIX: garantiza cierre aunque WritePrinter falle
+                win32print.ClosePrinter(h)  # FIX: garantiza cierre aunque WritePrinter falle
             return True, "Página de prueba enviada."
         except Exception as e:
             return False, str(e)

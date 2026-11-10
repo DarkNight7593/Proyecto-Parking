@@ -6,52 +6,55 @@ En sistemas no-Windows funciona en modo simulación (print en consola).
 Detección de estado usa WMIC (Win32_Printer) para capturar desconexiones USB
 en tiempo real, mucho más fiable que el Status del spooler de Windows.
 """
-import os
+
+import logging
 from datetime import datetime
-from typing import Dict
+
+logger = logging.getLogger(__name__)
 
 try:
     import win32print
+
     WINDOWS_PRINT = True
 except ImportError:
     WINDOWS_PRINT = False
 
 # ─── Comandos ESC/POS ─────────────────────────────────────────────────────────
-ESC = b'\x1b'
-GS  = b'\x1d'
+ESC = b"\x1b"
+GS = b"\x1d"
 
-INIT         = ESC + b'@'
-ALIGN_LEFT   = ESC + b'a\x00'
-ALIGN_CENTER = ESC + b'a\x01'
-ALIGN_RIGHT  = ESC + b'a\x02'
-TXT_NORMAL   = ESC + b'!\x00'
-TXT_DOUBLE   = ESC + b'!\x30'
-BOLD_ON      = ESC + b'E\x01'
-BOLD_OFF     = ESC + b'E\x00'
-CUT_FULL     = ESC + b'i'
-CUT_GS       = GS  + b'V\x00'
+INIT = ESC + b"@"
+ALIGN_LEFT = ESC + b"a\x00"
+ALIGN_CENTER = ESC + b"a\x01"
+ALIGN_RIGHT = ESC + b"a\x02"
+TXT_NORMAL = ESC + b"!\x00"
+TXT_DOUBLE = ESC + b"!\x30"
+BOLD_ON = ESC + b"E\x01"
+BOLD_OFF = ESC + b"E\x00"
+CUT_FULL = ESC + b"i"
+CUT_GS = GS + b"V\x00"
 
 ANCHO_TICKET = 42
 
 # ─── Mapa de estados win32print (PRINTER_INFO_2.Status) ──────────────────────
 _STATUS_MAP = [
-    (0x00000002, "error",   "⚠ Error general"),
-    (0x00000008, "error",   "⚠ Papel atascado"),
-    (0x00000010, "error",   "⚠ Sin papel"),
-    (0x00000040, "error",   "⚠ Problema de papel"),
-    (0x00000080, "error",   "⚠ Offline"),
-    (0x00100000, "error",   "⚠ Intervención manual"),
-    (0x00400000, "error",   "⚠ Cubierta abierta"),
-    (0x00040000, "error",   "⚠ Sin papel/tinta"),
-    (0x00200000, "error",   "⚠ Sin memoria"),
+    (0x00000002, "error", "⚠ Error general"),
+    (0x00000008, "error", "⚠ Papel atascado"),
+    (0x00000010, "error", "⚠ Sin papel"),
+    (0x00000040, "error", "⚠ Problema de papel"),
+    (0x00000080, "error", "⚠ Offline"),
+    (0x00100000, "error", "⚠ Intervención manual"),
+    (0x00400000, "error", "⚠ Cubierta abierta"),
+    (0x00040000, "error", "⚠ Sin papel/tinta"),
+    (0x00200000, "error", "⚠ Sin memoria"),
     (0x00020000, "warning", "⚠ Papel/tinta bajo"),
     (0x00000001, "warning", "⏸ Pausada"),
     (0x00001000, "warning", "⚠ No disponible"),
     (0x00000200, "warning", "⏳ Ocupada"),
-    (0x00000400, "ok",      "🖨 Imprimiendo..."),
-    (0x00004000, "ok",      "⚙ Procesando..."),
-    (0x00008000, "ok",      "⚙ Inicializando..."),
-    (0x00010000, "ok",      "⚙ Calentando..."),
+    (0x00000400, "ok", "🖨 Imprimiendo..."),
+    (0x00004000, "ok", "⚙ Procesando..."),
+    (0x00008000, "ok", "⚙ Inicializando..."),
+    (0x00010000, "ok", "⚙ Calentando..."),
 ]
 
 # PRINTER_ATTRIBUTE_WORK_OFFLINE flag
@@ -88,8 +91,8 @@ class Printer:
         except Exception as e:
             print(f"[ERROR Impresora] {e}")
             return False
-        
-# ─── NUEVO: Obtener estado real y detallado de la ticketera ────────────────
+
+    # ─── Estado de la ticketera ───────────────────────────────────────────────
     def get_estado_detallado(self) -> dict:
         """
         Consulta el estado de hardware de la impresora usando la API de Windows.
@@ -119,27 +122,27 @@ class Printer:
         except Exception as e:
             return {"nivel": "error", "mensaje": f"✗ Error de comunicación: {e}"}
 
-    # ─── NUEVO: Interceptor de seguridad con Ventana Emergente Congelante ─────
+    # ─── Confirmación ante errores de impresión ───────────────────────────────
     def verificar_estado_para_proceder(self, parent, impresion_solicitada: bool = True) -> str:
         """
         Comprueba el estado de la ticketera. Si falla, despliega un modal superpuesto
-        bloqueante usando grab_set(). 
+        bloqueante usando grab_set().
         Retorna 'intentar' (frenar proceso) o 'continuar' (proceder sin imprimir).
         """
         # Si el operador desmarcó la casilla de impresión, procedemos directo
         if not impresion_solicitada:
-            return "ok"   # FIX: era "continuar" — el código llamador trata "continuar"
-                          # como "no imprimir", así que con "ok" se respeta el estado
-                          # real de imprimir_entrada/imprimir sin forzar False.
+            return "ok"  # FIX: era "continuar" — el código llamador trata "continuar"
+            # como "no imprimir", así que con "ok" se respeta el estado
+            # real de imprimir_entrada/imprimir sin forzar False.
 
         estado = self.get_estado_detallado()
         if estado["nivel"] == "ok":
-            return "ok"   # FIX: era "continuar" — esto hacía que NUNCA se imprimiera
-                          # aunque la ticketera funcionara perfectamente, porque ambos
-                          # sitios de llamada (panel_principal y modal_cobro) tratan
-                          # "continuar" como señal de bypass (no imprimir).
-                          # Semántica correcta: "ok" = todo bien, proceder con la
-                          # impresión; "continuar" = usuario eligió omitir el ticket.
+            return "ok"  # FIX: era "continuar" — esto hacía que NUNCA se imprimiera
+            # aunque la ticketera funcionara perfectamente, porque ambos
+            # sitios de llamada (panel_principal y modal_cobro) tratan
+            # "continuar" como señal de bypass (no imprimir).
+            # Semántica correcta: "ok" = todo bien, proceder con la
+            # impresión; "continuar" = usuario eligió omitir el ticket.
 
         import customtkinter as ctk
 
@@ -161,23 +164,23 @@ class Printer:
             y = parent.winfo_y() + (parent.winfo_height() // 2) - (220 // 2)
             dialog.geometry(f"+{x}+{y}")
         except Exception:
-            pass
+            logger.debug("No se pudo centrar el diálogo de impresión", exc_info=True)
 
         # Interfaz Estética e Impactante
         ctk.CTkLabel(
-            dialog, 
-            text="⚠ ALERTA: TICKETERA NO DISPONIBLE", 
-            font=("Arial", 14, "bold"), 
-            text_color="#ff4d4d"
+            dialog,
+            text="⚠ ALERTA: TICKETERA NO DISPONIBLE",
+            font=("Arial", 14, "bold"),
+            text_color="#ff4d4d",
         ).pack(pady=(20, 10))
 
-        detalle = f"La impresora reporta anomalías o se encuentra desconectada.\n[Detalle]: {estado['mensaje']}\n\n¿Desea pausar para solucionar o continuar todo el proceso sin ticket?"
+        detalle = (
+            "La impresora reporta anomalías o se encuentra desconectada.\n"
+            f"[Detalle]: {estado['mensaje']}\n\n"
+            "¿Desea pausar para solucionar o continuar todo el proceso sin ticket?"
+        )
         ctk.CTkLabel(
-            dialog, 
-            text=detalle, 
-            font=("Arial", 11), 
-            justify="center",
-            wraplength=410
+            dialog, text=detalle, font=("Arial", 11), justify="center", wraplength=410
         ).pack(pady=5, padx=20)
 
         frame_btns = ctk.CTkFrame(dialog, fg_color="transparent")
@@ -192,39 +195,39 @@ class Printer:
             dialog.destroy()
 
         btn_intentar = ctk.CTkButton(
-            frame_btns, 
-            text="⏳ Intentar Luego (Pausar)", 
-            fg_color="#2b2b2b", 
-            hover_color="#3a3a3a", 
+            frame_btns,
+            text="⏳ Intentar Luego (Pausar)",
+            fg_color="#2b2b2b",
+            hover_color="#3a3a3a",
             height=36,
-            command=_on_intentar
+            command=_on_intentar,
         )
         btn_intentar.pack(side="left", expand=True, padx=5)
 
         btn_continuar = ctk.CTkButton(
-            frame_btns, 
-            text="✔ Continuar sin Imprimir", 
-            fg_color="#0d3321", 
-            hover_color="#134e32", 
+            frame_btns,
+            text="✔ Continuar sin Imprimir",
+            fg_color="#0d3321",
+            hover_color="#134e32",
             text_color="#2ecc71",
             font=("Arial", 12, "bold"),
             height=36,
-            command=_on_continuar
+            command=_on_continuar,
         )
         btn_continuar.pack(side="right", expand=True, padx=5)
 
         parent.wait_window(dialog)  # Congela la ejecución del código invocador aquí
         return resultado.get()
 
-# ─── Constructores de líneas ──────────────────
+    # ─── Constructores de líneas ──────────────────
 
     def _l(self, texto: str = "") -> bytes:
         return (texto[:ANCHO_TICKET] + "\n").encode("latin-1", errors="replace")
 
-    def _sep(self, char: str = "-") -> bytes:  
+    def _sep(self, char: str = "-") -> bytes:
         return self._l(char * ANCHO_TICKET)
 
-    def _sep2(self) -> bytes:             
+    def _sep2(self) -> bytes:
         return self._l("=" * ANCHO_TICKET)
 
     def _centro(self, texto: str) -> bytes:
@@ -236,33 +239,34 @@ class Printer:
 
     # ─── Ticket de entrada optimizado ─────────────────────────────────────────
 
-    def imprimir_entrada(self, sesion: Dict, nombre_negocio: str = "PARKING",
-                         direccion: str = "", telefono: str = "") -> bool:
+    def imprimir_entrada(
+        self, sesion: dict, nombre_negocio: str = "PARKING", direccion: str = "", telefono: str = ""
+    ) -> bool:
 
         ahora = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
 
         buf = bytearray()
         buf += INIT
         buf += CUT_FULL
-        buf += b'\n' * 2
+        buf += b"\n" * 2
 
         buf += ALIGN_CENTER
         buf += BOLD_ON + TXT_DOUBLE
         buf += self._l(f"  {nombre_negocio}  ")
         buf += BOLD_OFF + TXT_NORMAL
-        
+
         # Parámetros condicionales de la captura (Excluyendo RUC por completo)
         if direccion.strip():
             buf += self._l(direccion.strip())
         if telefono.strip():
             buf += self._l(f"Tel: {telefono.strip()}")
-            
+
         buf += self._sep2()
 
         buf += ALIGN_LEFT
         buf += self._par("Ticket N°:", sesion["ticket_numero"])
-        buf += self._par("Fecha:",     ahora.strftime("%d/%m/%Y"))
-        buf += self._par("Hora:",      ahora.strftime("%I:%M %p"))
+        buf += self._par("Fecha:", ahora.strftime("%d/%m/%Y"))
+        buf += self._par("Hora:", ahora.strftime("%I:%M %p"))
         buf += self._sep()
 
         buf += ALIGN_CENTER
@@ -277,52 +281,58 @@ class Printer:
         buf += ALIGN_CENTER
         buf += self._l("Conserve este ticket")
         buf += self._l("para el cobro a la salida")
-        buf += b'\n' * 5
+        buf += b"\n" * 5
         buf += CUT_FULL
 
         return self._enviar_raw(bytes(buf))
 
     # ─── Ticket de cobro (salida) optimizado ──────────────────────────────────
 
-    def imprimir_cobro(self, sesion: Dict, nombre_negocio: str = "PARKING",
-                       tarifa_hora: float = 2.0, moneda: str = "S/",
-                       direccion: str = "", telefono: str = "") -> bool:
+    def imprimir_cobro(
+        self,
+        sesion: dict,
+        nombre_negocio: str = "PARKING",
+        tarifa_hora: float = 2.0,
+        moneda: str = "S/",
+        direccion: str = "",
+        telefono: str = "",
+    ) -> bool:
 
         entrada = datetime.strptime(sesion["hora_entrada"], "%Y-%m-%d %H:%M:%S")
-        salida  = datetime.strptime(sesion["hora_salida"],  "%Y-%m-%d %H:%M:%S")
+        salida = datetime.strptime(sesion["hora_salida"], "%Y-%m-%d %H:%M:%S")
 
-        minutos   = sesion.get("minutos_total", 0)
+        minutos = sesion.get("minutos_total", 0)
         horas_str = f"{minutos // 60}h {minutos % 60:02d}min"
         monto_str = f"{moneda} {sesion['monto']:.2f}"
 
         buf = bytearray()
         buf += INIT
         buf += CUT_FULL
-        buf += b'\n' * 2
+        buf += b"\n" * 2
 
         buf += ALIGN_CENTER
         buf += BOLD_ON + TXT_DOUBLE
         buf += self._l(f"  {nombre_negocio}  ")
         buf += BOLD_OFF + TXT_NORMAL
-        
+
         # Parámetros condicionales de la captura (Excluyendo RUC por completo)
         if direccion.strip():
             buf += self._l(direccion.strip())
         if telefono.strip():
             buf += self._l(f"Tel: {telefono.strip()}")
-            
+
         buf += self._sep2()
 
         buf += ALIGN_LEFT
         buf += self._par("Ticket N°:", sesion["ticket_numero"])
-        buf += self._par("Fecha:",     salida.strftime("%d/%m/%Y"))
+        buf += self._par("Fecha:", salida.strftime("%d/%m/%Y"))
         buf += self._sep()
         buf += self._par("Vehiculo:", sesion["tipo_vehiculo"])
         buf += self._par("Placa:", sesion["placa"])
         buf += self._sep()
         buf += self._par("Entrada:", entrada.strftime("%I:%M %p"))
-        buf += self._par("Salida:",  salida.strftime("%I:%M %p"))
-        buf += self._par("Tiempo:",  horas_str)
+        buf += self._par("Salida:", salida.strftime("%I:%M %p"))
+        buf += self._par("Tiempo:", horas_str)
         buf += self._par("Tarifa:", f"{moneda}{tarifa_hora:.2f}/hr")
         buf += self._sep2()
 
@@ -332,7 +342,7 @@ class Printer:
         buf += BOLD_OFF + TXT_NORMAL
         buf += self._sep()
         buf += self._l("*** GRACIAS POR SU VISITA ***")
-        buf += b'\n' * 6
+        buf += b"\n" * 6
         buf += CUT_FULL
 
         return self._enviar_raw(bytes(buf))

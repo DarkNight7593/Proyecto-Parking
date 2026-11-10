@@ -2,6 +2,12 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # Bases de datos locales
 parkingpro.db
@@ -12,4 +18,9 @@ parkingpro.db
 config.ini
 
 build/
+dist/
 ParkingPro.spec
+
+# Reportes generados
+reportes/
+*.xlsx
